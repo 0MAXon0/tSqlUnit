@@ -10,7 +10,6 @@ namespace TSqlUnit
     public class SqlTestContext : IDisposable
     {
         private readonly string _connectionString;
-        private readonly SqlObjectHelper _helper;
         private readonly List<FakeDependency> _fakes = new List<FakeDependency>();
         
         private string _targetProcedure;
@@ -18,14 +17,9 @@ namespace TSqlUnit
         private string _testProcedureName;
         private bool _isBuilt = false;
         
-        /// <summary>
-        /// Создает новый контекст для тестирования SQL процедуры
-        /// </summary>
-        /// <param name="connectionString">Строка подключения к SQL Server</param>
         public SqlTestContext(string connectionString)
         {
             _connectionString = connectionString ?? throw new ArgumentNullException(nameof(connectionString));
-            _helper = new SqlObjectHelper(connectionString);
         }
         
         /// <summary>
@@ -85,13 +79,13 @@ namespace TSqlUnit
                 throw new InvalidOperationException("Target procedure not specified. Call ForProcedure() first.");
             
             // Шаг 1: Получаем каноническое имя процедуры
-            _canonicalProcedureName = _helper.GetCanonicalName(_targetProcedure);
+            _canonicalProcedureName = SqlMetadataReader.GetCanonicalName(_connectionString, _targetProcedure);
             if (_canonicalProcedureName == null)
                 throw new InvalidOperationException(
                     string.Format("Procedure '{0}' not found", _targetProcedure));
             
             // Шаг 2: Получаем определение процедуры
-            var procedureDefinition = Core.GetObjectDefinition(_connectionString, _canonicalProcedureName);
+            var procedureDefinition = SqlMetadataReader.GetObjectDefinition(_connectionString, _canonicalProcedureName);
             
             if (procedureDefinition == null)
                 throw new InvalidOperationException(
@@ -103,7 +97,7 @@ namespace TSqlUnit
             foreach (var fake in _fakes)
             {
                 // 3.1: Получаем каноническое имя функции
-                fake.CanonicalName = _helper.GetCanonicalName(fake.OriginalName);
+                fake.CanonicalName = SqlMetadataReader.GetCanonicalName(_connectionString, fake.OriginalName);
                 if (fake.CanonicalName == null)
                     throw new InvalidOperationException(
                         string.Format("Function '{0}' not found", fake.OriginalName));
@@ -112,21 +106,21 @@ namespace TSqlUnit
                 fake.FakeName = TestObjectNameGenerator.Generate(fake.CanonicalName, fake.ObjectType);
                 
                 // 3.3: Заменяем имя в скрипте пользователя
-                fake.FakeDefinitionRenamed = Core.ReplaceObjectName(
+                fake.FakeDefinitionRenamed = SqlScriptModifier.ReplaceObjectName(
                     fake.FakeDefinition,
                     fake.OriginalName,
                     string.Format("[dbo].[{0}]", fake.FakeName)
                 );
                 
                 // 3.4: Заменяем вызовы функции в процедуре на fake
-                modifiedProcedureDefinition = Core.ReplaceObjectName(
+                modifiedProcedureDefinition = SqlScriptModifier.ReplaceObjectName(
                     modifiedProcedureDefinition,
                     fake.CanonicalName,
                     string.Format("[dbo].[{0}]", fake.FakeName)
                 );
                 
                 // 3.5: Создаем fake функцию в БД
-                _helper.ExecuteSql(fake.FakeDefinitionRenamed);
+                ExecuteSql(fake.FakeDefinitionRenamed);
             }
             
             // Шаг 4: Генерируем имя для тестовой процедуры
@@ -136,14 +130,14 @@ namespace TSqlUnit
             );
             
             // Шаг 5: Заменяем имя процедуры в определении
-            var testProcedureDefinition = Core.ReplaceObjectName(
+            var testProcedureDefinition = SqlScriptModifier.ReplaceObjectName(
                 modifiedProcedureDefinition,
                 _canonicalProcedureName,
                 string.Format("[dbo].[{0}]", _testProcedureName)
             );
             
             // Шаг 6: Создаем тестовую процедуру
-            _helper.ExecuteSql(testProcedureDefinition);
+            ExecuteSql(testProcedureDefinition);
             
             _isBuilt = true;
             return this;
@@ -257,9 +251,6 @@ namespace TSqlUnit
             return result;
         }
         
-        /// <summary>
-        /// Очищает все временные объекты
-        /// </summary>
         public void Cleanup()
         {
             if (!_isBuilt)
@@ -267,46 +258,56 @@ namespace TSqlUnit
             
             try
             {
-                // Удаляем тестовую процедуру
                 if (!string.IsNullOrEmpty(_testProcedureName))
                 {
-                    _helper.DropObject(_testProcedureName, "PROCEDURE");
+                    DropObject(_testProcedureName, "PROCEDURE");
                 }
                 
-                // Удаляем fake функции
                 foreach (var fake in _fakes)
                 {
                     if (!string.IsNullOrEmpty(fake.FakeName))
                     {
-                        _helper.DropObject(fake.FakeName, "FUNCTION");
+                        DropObject(fake.FakeName, "FUNCTION");
                     }
                 }
             }
             catch
             {
-                // Игнорируем ошибки при очистке
             }
         }
         
-        /// <summary>
-        /// Освобождает ресурсы и удаляет временные объекты
-        /// </summary>
         public void Dispose()
         {
             Cleanup();
         }
         
-        /// <summary>
-        /// Получает имя созданной тестовой процедуры (только имя, без схемы)
-        /// </summary>
         public string TestProcedureName => _testProcedureName;
         
-        /// <summary>
-        /// Получает информацию о созданных fake объектах
-        /// </summary>
         public IReadOnlyList<FakeDependency> Fakes
         {
             get { return _fakes.AsReadOnly(); }
+        }
+
+        private void ExecuteSql(string sql)
+        {
+            using (var connection = new SqlConnection(_connectionString))
+            using (var command = new SqlCommand(sql, connection))
+            {
+                connection.Open();
+                command.ExecuteNonQuery();
+            }
+        }
+
+        private void DropObject(string objectName, string objectType)
+        {
+            var sql = string.Format("DROP {0} IF EXISTS [dbo].[{1}]", objectType, objectName);
+            try
+            {
+                ExecuteSql(sql);
+            }
+            catch
+            {
+            }
         }
     }
 }
