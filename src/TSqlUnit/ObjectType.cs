@@ -1,4 +1,4 @@
-﻿namespace TSqlUnit
+namespace TSqlUnit
 {
     /// <summary>
     /// Тип объекта
@@ -23,6 +23,11 @@
         /// <summary>
         /// Представление
         /// </summary>
-        View
+        View,
+
+        /// <summary>
+        /// Триггер
+        /// </summary>
+        Trigger
     }
 }

@@ -1,4 +1,4 @@
-﻿using Microsoft.Data.SqlClient;
+using Microsoft.Data.SqlClient;
 using System;
 using System.IO;
 using System.Linq;
@@ -117,34 +117,6 @@ namespace TSqlUnit
             }
         }
 
-        public static string GenerateTestObjectName(string originalName, ObjectType objectType)
-        {
-            var objectName = originalName.Split('.').Last();
-
-            string prefix;
-            switch (objectType)
-            {
-                case ObjectType.Table:
-                    prefix = "TestTable";
-                    break;
-                case ObjectType.View:
-                    prefix = "TestView";
-                    break;
-                case ObjectType.StoredProcedure:
-                    prefix = "TestProc";
-                    break;
-                case ObjectType.Function:
-                    prefix = "TestFunc";
-                    break;
-                default:
-                    prefix = "TestObj";
-                    break;
-            }
-
-            var id = Guid.NewGuid().ToString("N").Substring(0, 6);
-
-            return $"[dbo].[{prefix}_{objectName}_{id}]";
-        }
 
         /// <summary>
         /// Заменяет все вхождения имени объекта в SQL определении.
