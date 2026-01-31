@@ -23,11 +23,6 @@
         /// <summary>
         /// Представление
         /// </summary>
-        View,
-
-        /// <summary>
-        /// Триггер
-        /// </summary>
-        Trigger
+        View
     }
 }

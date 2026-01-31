@@ -1,6 +1,8 @@
 ﻿using Microsoft.Data.SqlClient;
 using System;
 using System.IO;
+using System.Linq;
+using System.Text.RegularExpressions;
 
 namespace TSqlUnit
 {
@@ -112,6 +114,138 @@ namespace TSqlUnit
 
                 connection.Open();
                 return command.ExecuteScalar() as string;
+            }
+        }
+
+        public static string GenerateTestObjectName(string originalName, ObjectType objectType)
+        {
+            var objectName = originalName.Split('.').Last();
+
+            string prefix;
+            switch (objectType)
+            {
+                case ObjectType.Table:
+                    prefix = "TestTable";
+                    break;
+                case ObjectType.View:
+                    prefix = "TestView";
+                    break;
+                case ObjectType.StoredProcedure:
+                    prefix = "TestProc";
+                    break;
+                case ObjectType.Function:
+                    prefix = "TestFunc";
+                    break;
+                default:
+                    prefix = "TestObj";
+                    break;
+            }
+
+            var id = Guid.NewGuid().ToString("N").Substring(0, 6);
+
+            return $"[dbo].[{prefix}_{objectName}_{id}]";
+        }
+
+        /// <summary>
+        /// Заменяет все вхождения имени объекта в SQL определении.
+        /// Умная логика: для dbo заменяет с/без схемы, для других только с явной схемой.
+        /// Защищает от частичных совпадений (test не заменит test2 или mytest).
+        /// </summary>
+        public static string ReplaceObjectName(string definition, string oldFullName, string newFullName)
+        {
+            if (string.IsNullOrWhiteSpace(definition))
+                throw new ArgumentNullException(nameof(definition));
+
+            if (string.IsNullOrWhiteSpace(oldFullName))
+                throw new ArgumentNullException(nameof(oldFullName));
+
+            if (string.IsNullOrWhiteSpace(newFullName))
+                throw new ArgumentNullException(nameof(newFullName));
+
+            var (oldSchema, oldName) = ParseName(oldFullName);
+            var (newSchema, newName) = ParseName(newFullName);
+
+            var result = definition;
+
+            // Шаг 1: ВСЕГДА заменяем с явной схемой
+            // Паттерн: [oldSchema].[oldName] (в любых вариациях скобок)
+            var patternWithSchema = string.Format(
+                @"(?<![.\[\]\w])\[?{0}\]?\.\[?{1}\]?(?![.\[\]\w])",
+                Regex.Escape(oldSchema),
+                Regex.Escape(oldName)
+            );
+
+            var replacement = string.Format("[{0}].[{1}]", newSchema, newName);
+
+            result = Regex.Replace(result, patternWithSchema, replacement, RegexOptions.IgnoreCase);
+
+            // Шаг 2: Если старая схема = dbo, заменяем также БЕЗ схемы
+            // (потому что объект без схемы в SQL Server = dbo)
+            if (oldSchema.Equals("dbo", StringComparison.OrdinalIgnoreCase))
+            {
+                var patternWithoutSchema = string.Format(
+                    @"(?<![.\[\]\w])\[?{0}\]?(?![.\[\]\w])",
+                    Regex.Escape(oldName)
+                );
+
+                result = Regex.Replace(result, patternWithoutSchema, replacement, RegexOptions.IgnoreCase);
+            }
+
+            return result;
+        }
+
+        private static (string schema, string name) ParseName(string fullName)
+        {
+            // Убираем квадратные скобки
+            var cleaned = fullName.Replace("[", "").Replace("]", "");
+
+            // Разделяем по точке
+            var parts = cleaned.Split('.');
+
+            if (parts.Length == 2)
+            {
+                return (parts[0], parts[1]);
+            }
+            else if (parts.Length == 1)
+            {
+                // Если схема не указана, по умолчанию dbo
+                return ("dbo", parts[0]);
+            }
+            else
+            {
+                throw new ArgumentException(
+                    string.Format("Invalid object name format: '{0}'. Expected: [schema].[name] or name", fullName),
+                    nameof(fullName));
+            }
+        }
+
+        /// <summary>
+        /// Получает каноническое имя объекта в формате [schema].[name] из SQL Server
+        /// </summary>
+        /// <param name="connectionString">Строка подключения</param>
+        /// <param name="objectName">Имя объекта (может быть: MyView, dbo.MyView, [dbo].[MyView])</param>
+        /// <returns>Каноническое имя [schema].[name] или null если объект не найден</returns>
+        public static string GetCanonicalObjectName(string connectionString, string objectName)
+        {
+            if (string.IsNullOrWhiteSpace(connectionString))
+                throw new ArgumentNullException(nameof(connectionString));
+
+            if (string.IsNullOrWhiteSpace(objectName))
+                throw new ArgumentNullException(nameof(objectName));
+
+            var sql = @"
+        SELECT QUOTENAME(OBJECT_SCHEMA_NAME(OBJECT_ID(@objectName))) + '.' + 
+               QUOTENAME(OBJECT_NAME(OBJECT_ID(@objectName))) AS object_fullname";
+
+            using (var connection = new SqlConnection(connectionString))
+            using (var command = new SqlCommand(sql, connection))
+            {
+                command.Parameters.AddWithValue("@objectName", objectName);
+                connection.Open();
+
+                var result = command.ExecuteScalar();
+
+                return result as string;
             }
         }
     }
