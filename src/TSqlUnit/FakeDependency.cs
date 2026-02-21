@@ -34,5 +34,15 @@ namespace TSqlUnit
         /// Определение fake объекта с замененным именем (готовый к выполнению)
         /// </summary>
         public string FakeDefinitionRenamed { get; set; }
+
+        /// <summary>
+        /// Имя spy-таблицы для логирования вызовов fake процедуры (без схемы)
+        /// </summary>
+        public string SpyLogTableName { get; set; }
+
+        /// <summary>
+        /// Скрипт создания spy-таблицы для fake процедуры
+        /// </summary>
+        public string SpyLogTableDefinition { get; set; }
     }
 }

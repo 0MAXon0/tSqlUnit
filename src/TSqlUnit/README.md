@@ -7,6 +7,7 @@
 - ✅ Получение определений SQL объектов (представления, процедуры, функции, триггеры)
 - ✅ Генерация полного CREATE TABLE скрипта с constraints
 - ✅ Мокирование функций при тестировании процедур
+- ✅ Фейкование таблиц при тестировании процедур
 - ✅ Автоматическая очистка временных объектов
 - ✅ Fluent API для удобной настройки тестов
 
@@ -138,6 +139,26 @@ public SqlTestContext MockFunction(string functionName, string fakeDefinition)
 ```
 Добавляет мок функции.
 
+#### MockView
+```csharp
+public SqlTestContext MockView(string viewName, string fakeDefinition)
+```
+Добавляет мок представления.
+
+#### MockProcedure
+```csharp
+public SqlTestContext MockProcedure(string procedureName, string customSqlAfterSpyInsert = null)
+```
+Добавляет fake процедуру и spy-таблицу для логирования вызовов.
+Параметр `customSqlAfterSpyInsert` (опциональный) вклеивается в тело fake процедуры
+сразу после `INSERT` в spy-таблицу.
+
+#### MockTable
+```csharp
+public SqlTestContext MockTable(string tableName, TableDefinitionOptions options = null)
+```
+Добавляет fake таблицу: определение берется автоматически через `GetTableDefinition()`.
+
 #### Build
 ```csharp
 public SqlTestContext Build()
@@ -155,6 +176,32 @@ public SqlTestContext Execute(params SqlParameter[] parameters)
 public SqlTestResult ExecuteWithResult(params SqlParameter[] parameters)
 ```
 Выполняет тестовую процедуру с параметрами и возвращает результаты (SELECT-ы, OUT параметры, RETURN значение).
+
+#### GetSpyProcedureLog
+```csharp
+public DataTable GetSpyProcedureLog(string procedureName)
+```
+Возвращает логи вызовов fake процедуры из spy-таблицы.
+
+#### ExecuteNonQuery
+```csharp
+public int ExecuteNonQuery(string sql, params SqlParameter[] parameters)
+```
+Выполняет произвольный SQL (удобно для seed/cleanup в тестах).
+
+#### ExecuteQuery
+```csharp
+public DataTable ExecuteQuery(string sql, params SqlParameter[] parameters)
+```
+Выполняет произвольный SQL и возвращает первый результирующий набор.
+
+#### TryGetFake / GetFake / GetFakeName
+```csharp
+public bool TryGetFake(ObjectType objectType, string objectName, out FakeDependency fake)
+public FakeDependency GetFake(ObjectType objectType, string objectName)
+public string GetFakeName(ObjectType objectType, string objectName)
+```
+Доступ к информации о созданных fake-объектах.
 
 ### Cleanup
 ```csharp
@@ -206,6 +253,25 @@ public T MapToObject<T>(int resultSetIndex, Func<DataRow, T> mapper)
 ```
 Маппит первую строку результирующего набора в объект.
 
+## DataTableComparer
+
+Утилиты для сравнения и проекции `DataTable` без привязки к конкретному test framework.
+
+### SelectColumns
+```csharp
+public static DataTable SelectColumns(DataTable source, params string[] requestedColumns)
+```
+Выбирает подмножество колонок из результирующей таблицы.
+
+### Compare
+```csharp
+public static DataTableComparisonResult Compare(
+    DataTable expected,
+    DataTable actual,
+    DataTableComparisonOptions options = null)
+```
+Сравнивает таблицы и возвращает `IsEqual` + `DiffMessage`.
+
 ### TableDefinitionOptions
 
 Опции для генерации CREATE TABLE скрипта.
@@ -234,6 +300,7 @@ public class TableDefinitionOptions
 - `VIEW DEFINITION` - для получения определений объектов
 - `CREATE PROCEDURE` - для создания тестовых процедур (только для SqlTestContext)
 - `CREATE FUNCTION` - для создания fake функций (только для SqlTestContext)
+- `CREATE TABLE` - для создания fake таблиц (только для SqlTestContext)
 - Права на чтение системных представлений:
   - `sys.objects`
   - `sys.columns`

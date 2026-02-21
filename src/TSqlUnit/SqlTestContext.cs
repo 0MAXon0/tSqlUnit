@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Data;
 using Microsoft.Data.SqlClient;
 
 namespace TSqlUnit
@@ -65,6 +66,112 @@ namespace TSqlUnit
             
             return this;
         }
+
+        /// <summary>
+        /// Добавляет мок представления
+        /// </summary>
+        /// <param name="viewName">Имя представления для мокирования</param>
+        /// <param name="fakeDefinition">Скрипт CREATE VIEW для подмены</param>
+        /// <returns>Текущий контекст для цепочки вызовов</returns>
+        public SqlTestContext MockView(string viewName, string fakeDefinition)
+        {
+            if (_isBuilt)
+                throw new InvalidOperationException("Cannot modify context after Build() was called");
+
+            if (string.IsNullOrWhiteSpace(viewName))
+                throw new ArgumentNullException(nameof(viewName));
+
+            if (string.IsNullOrWhiteSpace(fakeDefinition))
+                throw new ArgumentNullException(nameof(fakeDefinition));
+
+            _fakes.Add(new FakeDependency
+            {
+                OriginalName = viewName,
+                ObjectType = ObjectType.View,
+                FakeDefinition = fakeDefinition
+            });
+
+            return this;
+        }
+
+        /// <summary>
+        /// Добавляет fake процедуру с логированием входных параметров в spy-таблицу
+        /// </summary>
+        /// <param name="procedureName">Имя процедуры для фейкования</param>
+        /// <param name="customSqlAfterSpyInsert">
+        /// Дополнительный SQL, который будет выполнен сразу после INSERT в spy-таблицу
+        /// </param>
+        /// <returns>Текущий контекст для цепочки вызовов</returns>
+        public SqlTestContext MockProcedure(string procedureName, string customSqlAfterSpyInsert = null)
+        {
+            if (_isBuilt)
+                throw new InvalidOperationException("Cannot modify context after Build() was called");
+
+            if (string.IsNullOrWhiteSpace(procedureName))
+                throw new ArgumentNullException(nameof(procedureName));
+
+            var canonicalProcedureName = SqlMetadataReader.GetCanonicalName(_connectionString, procedureName);
+            if (canonicalProcedureName == null)
+                throw new InvalidOperationException(
+                    string.Format("Procedure '{0}' not found", procedureName));
+
+            var templateInfo = SqlMetadataReader.GetFakeProcedureTemplateInfo(_connectionString, canonicalProcedureName);
+            if (templateInfo == null)
+                throw new InvalidOperationException(
+                    string.Format("Cannot get fake template info for procedure '{0}'", canonicalProcedureName));
+
+            var spyLogTableName = TestObjectNameGenerator.Generate(
+                canonicalProcedureName + "_SpyProcedureLog",
+                ObjectType.Table
+            );
+
+            var fakeProcedureDefinition = BuildFakeProcedureDefinition(
+                canonicalProcedureName,
+                spyLogTableName,
+                templateInfo,
+                customSqlAfterSpyInsert
+            );
+
+            _fakes.Add(new FakeDependency
+            {
+                OriginalName = procedureName,
+                ObjectType = ObjectType.StoredProcedure,
+                FakeDefinition = fakeProcedureDefinition,
+                SpyLogTableName = spyLogTableName,
+                SpyLogTableDefinition = BuildSpyLogTableDefinition(spyLogTableName, templateInfo.ColumnsList)
+            });
+
+            return this;
+        }
+
+        /// <summary>
+        /// Добавляет fake таблицу на основе metadata исходной таблицы
+        /// </summary>
+        /// <param name="tableName">Имя таблицы для подмены</param>
+        /// <param name="options">Опции генерации CREATE TABLE скрипта</param>
+        /// <returns>Текущий контекст для цепочки вызовов</returns>
+        public SqlTestContext MockTable(string tableName, TableDefinitionOptions options = null)
+        {
+            if (_isBuilt)
+                throw new InvalidOperationException("Cannot modify context after Build() was called");
+
+            if (string.IsNullOrWhiteSpace(tableName))
+                throw new ArgumentNullException(nameof(tableName));
+
+            var tableDefinition = SqlMetadataReader.GetTableDefinition(_connectionString, tableName, options);
+            if (string.IsNullOrWhiteSpace(tableDefinition))
+                throw new InvalidOperationException(
+                    string.Format("Cannot get definition for table '{0}'", tableName));
+
+            _fakes.Add(new FakeDependency
+            {
+                OriginalName = tableName,
+                ObjectType = ObjectType.Table,
+                FakeDefinition = tableDefinition
+            });
+
+            return this;
+        }
         
         /// <summary>
         /// Создает все временные объекты в БД
@@ -91,35 +198,42 @@ namespace TSqlUnit
                 throw new InvalidOperationException(
                     string.Format("Cannot get definition for procedure '{0}'", _canonicalProcedureName));
             
-            // Шаг 3: Создаем fake функции и заменяем их в определении процедуры
+            // Шаг 3: Создаем fake объекты и заменяем их в определении процедуры
             var modifiedProcedureDefinition = procedureDefinition;
             
             foreach (var fake in _fakes)
             {
-                // 3.1: Получаем каноническое имя функции
+                // 3.1: Получаем каноническое имя объекта
                 fake.CanonicalName = SqlMetadataReader.GetCanonicalName(_connectionString, fake.OriginalName);
                 if (fake.CanonicalName == null)
                     throw new InvalidOperationException(
-                        string.Format("Function '{0}' not found", fake.OriginalName));
+                        string.Format("{0} '{1}' not found", GetObjectDisplayName(fake.ObjectType), fake.OriginalName));
                 
-                // 3.2: Генерируем имя для fake функции
+                // 3.2: Генерируем имя для fake объекта
                 fake.FakeName = TestObjectNameGenerator.Generate(fake.CanonicalName, fake.ObjectType);
                 
-                // 3.3: Заменяем имя в скрипте пользователя
+                // 3.3: Заменяем имя в fake-скрипте
+                var fakeFullName = string.Format("[dbo].[{0}]", fake.FakeName);
                 fake.FakeDefinitionRenamed = SqlScriptModifier.ReplaceObjectName(
                     fake.FakeDefinition,
-                    fake.OriginalName,
-                    string.Format("[dbo].[{0}]", fake.FakeName)
+                    fake.CanonicalName,
+                    fakeFullName
                 );
                 
-                // 3.4: Заменяем вызовы функции в процедуре на fake
+                // 3.4: Заменяем обращения к объекту в процедуре на fake
                 modifiedProcedureDefinition = SqlScriptModifier.ReplaceObjectName(
                     modifiedProcedureDefinition,
                     fake.CanonicalName,
-                    string.Format("[dbo].[{0}]", fake.FakeName)
+                    fakeFullName
                 );
                 
-                // 3.5: Создаем fake функцию в БД
+                // 3.5: Создаем fake объект в БД
+                if (fake.ObjectType == ObjectType.StoredProcedure &&
+                    !string.IsNullOrWhiteSpace(fake.SpyLogTableDefinition))
+                {
+                    ExecuteSql(fake.SpyLogTableDefinition);
+                }
+
                 ExecuteSql(fake.FakeDefinitionRenamed);
             }
             
@@ -250,6 +364,74 @@ namespace TSqlUnit
             
             return result;
         }
+
+        /// <summary>
+        /// Выполняет произвольный SQL без возврата наборов данных
+        /// </summary>
+        public int ExecuteNonQuery(string sql, params SqlParameter[] parameters)
+        {
+            if (string.IsNullOrWhiteSpace(sql))
+                throw new ArgumentNullException(nameof(sql));
+
+            using (var connection = new SqlConnection(_connectionString))
+            using (var command = new SqlCommand(sql, connection))
+            {
+                if (parameters != null && parameters.Length > 0)
+                {
+                    command.Parameters.AddRange(parameters);
+                }
+
+                connection.Open();
+                return command.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>
+        /// Возвращает логи вызовов fake процедуры из spy-таблицы
+        /// </summary>
+        /// <param name="procedureName">Имя процедуры, переданной в MockProcedure()</param>
+        /// <returns>Таблица с логами вызовов</returns>
+        public DataTable GetSpyProcedureLog(string procedureName)
+        {
+            if (!_isBuilt)
+                throw new InvalidOperationException("Call Build() before GetSpyProcedureLog()");
+
+            if (string.IsNullOrWhiteSpace(procedureName))
+                throw new ArgumentNullException(nameof(procedureName));
+
+            var canonicalProcedureName = SqlMetadataReader.GetCanonicalName(_connectionString, procedureName);
+            if (canonicalProcedureName == null)
+                throw new InvalidOperationException(
+                    string.Format("Procedure '{0}' not found", procedureName));
+
+            FakeDependency procedureFake = null;
+            foreach (var fake in _fakes)
+            {
+                if (fake.ObjectType != ObjectType.StoredProcedure)
+                    continue;
+
+                var matchesCanonical = !string.IsNullOrWhiteSpace(fake.CanonicalName) &&
+                                       fake.CanonicalName.Equals(canonicalProcedureName, StringComparison.OrdinalIgnoreCase);
+                var matchesOriginal = fake.OriginalName.Equals(procedureName, StringComparison.OrdinalIgnoreCase);
+
+                if (matchesCanonical || matchesOriginal)
+                {
+                    procedureFake = fake;
+                    break;
+                }
+            }
+
+            if (procedureFake == null || string.IsNullOrWhiteSpace(procedureFake.SpyLogTableName))
+                throw new InvalidOperationException(
+                    string.Format("Spy log for procedure '{0}' not found. Call MockProcedure() before Build().", procedureName));
+
+            var sql = string.Format(
+                "SELECT * FROM [dbo].[{0}] ORDER BY [_id_];",
+                procedureFake.SpyLogTableName
+            );
+
+            return ExecuteQuery(sql);
+        }
         
         public void Cleanup()
         {
@@ -267,7 +449,13 @@ namespace TSqlUnit
                 {
                     if (!string.IsNullOrEmpty(fake.FakeName))
                     {
-                        DropObject(fake.FakeName, "FUNCTION");
+                        DropObject(fake.FakeName, GetDropObjectType(fake.ObjectType));
+                    }
+
+                    if (fake.ObjectType == ObjectType.StoredProcedure &&
+                        !string.IsNullOrEmpty(fake.SpyLogTableName))
+                    {
+                        DropObject(fake.SpyLogTableName, GetDropObjectType(ObjectType.Table));
                     }
                 }
             }
@@ -288,14 +476,95 @@ namespace TSqlUnit
             get { return _fakes.AsReadOnly(); }
         }
 
+        /// <summary>
+        /// Пытается найти fake объект по типу и имени (original/canonical)
+        /// </summary>
+        public bool TryGetFake(ObjectType objectType, string objectName, out FakeDependency fake)
+        {
+            if (string.IsNullOrWhiteSpace(objectName))
+                throw new ArgumentNullException(nameof(objectName));
+
+            foreach (var item in _fakes)
+            {
+                if (item.ObjectType != objectType)
+                    continue;
+
+                if (item.OriginalName.Equals(objectName, StringComparison.OrdinalIgnoreCase))
+                {
+                    fake = item;
+                    return true;
+                }
+
+                if (!string.IsNullOrWhiteSpace(item.CanonicalName) &&
+                    item.CanonicalName.Equals(objectName, StringComparison.OrdinalIgnoreCase))
+                {
+                    fake = item;
+                    return true;
+                }
+            }
+
+            fake = null;
+            return false;
+        }
+
+        /// <summary>
+        /// Возвращает fake объект по типу и имени (original/canonical)
+        /// </summary>
+        public FakeDependency GetFake(ObjectType objectType, string objectName)
+        {
+            FakeDependency fake;
+            if (!TryGetFake(objectType, objectName, out fake))
+            {
+                throw new InvalidOperationException(
+                    string.Format("Fake object not found: type={0}, name={1}", objectType, objectName));
+            }
+
+            return fake;
+        }
+
+        /// <summary>
+        /// Возвращает сгенерированное имя fake объекта
+        /// </summary>
+        public string GetFakeName(ObjectType objectType, string objectName)
+        {
+            var fake = GetFake(objectType, objectName);
+            if (string.IsNullOrWhiteSpace(fake.FakeName))
+            {
+                throw new InvalidOperationException(
+                    "Fake name is not generated yet. Call Build() before requesting fake names.");
+            }
+
+            return fake.FakeName;
+        }
+
         private void ExecuteSql(string sql)
         {
+            ExecuteNonQuery(sql);
+        }
+
+        /// <summary>
+        /// Выполняет произвольный SQL и возвращает первый результирующий набор
+        /// </summary>
+        public DataTable ExecuteQuery(string sql, params SqlParameter[] parameters)
+        {
+            if (string.IsNullOrWhiteSpace(sql))
+                throw new ArgumentNullException(nameof(sql));
+
+            var result = new DataTable();
             using (var connection = new SqlConnection(_connectionString))
             using (var command = new SqlCommand(sql, connection))
+            using (var adapter = new SqlDataAdapter(command))
             {
+                if (parameters != null && parameters.Length > 0)
+                {
+                    command.Parameters.AddRange(parameters);
+                }
+
                 connection.Open();
-                command.ExecuteNonQuery();
+                adapter.Fill(result);
             }
+
+            return result;
         }
 
         private void DropObject(string objectName, string objectType)
@@ -307,6 +576,111 @@ namespace TSqlUnit
             }
             catch
             {
+            }
+        }
+
+        private static string BuildSpyLogTableDefinition(string spyLogTableName, string columnsList)
+        {
+            if (string.IsNullOrWhiteSpace(spyLogTableName))
+                throw new ArgumentNullException(nameof(spyLogTableName));
+
+            var effectiveColumns = string.IsNullOrWhiteSpace(columnsList)
+                ? "_id_ INT IDENTITY(1,1) PRIMARY KEY CLUSTERED"
+                : columnsList;
+
+            return string.Format(
+@"CREATE TABLE [dbo].[{0}]
+(
+{1}
+);",
+                spyLogTableName,
+                effectiveColumns
+            );
+        }
+
+        private static string BuildFakeProcedureDefinition(
+            string canonicalProcedureName,
+            string spyLogTableName,
+            FakeProcedureTemplateInfo templateInfo,
+            string customSqlAfterSpyInsert)
+        {
+            if (string.IsNullOrWhiteSpace(canonicalProcedureName))
+                throw new ArgumentNullException(nameof(canonicalProcedureName));
+            if (string.IsNullOrWhiteSpace(spyLogTableName))
+                throw new ArgumentNullException(nameof(spyLogTableName));
+            if (templateInfo == null)
+                throw new ArgumentNullException(nameof(templateInfo));
+
+            var parametersClause = string.IsNullOrWhiteSpace(templateInfo.ParametersList)
+                ? string.Empty
+                : "\n" + templateInfo.ParametersList;
+
+            var insertStatement = string.IsNullOrWhiteSpace(templateInfo.InsertList) ||
+                                  string.IsNullOrWhiteSpace(templateInfo.SelectList)
+                ? string.Format("    INSERT INTO [dbo].[{0}] DEFAULT VALUES;", spyLogTableName)
+                : string.Format(
+@"    INSERT INTO [dbo].[{0}] ({1})
+    SELECT {2};",
+                    spyLogTableName,
+                    templateInfo.InsertList,
+                    templateInfo.SelectList
+                );
+
+            var procedureBody = insertStatement;
+            if (!string.IsNullOrWhiteSpace(customSqlAfterSpyInsert))
+            {
+                procedureBody = procedureBody + "\n\n" + customSqlAfterSpyInsert;
+            }
+
+            return string.Format(
+@"CREATE PROCEDURE {0}{1}
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+{2}
+END;",
+                canonicalProcedureName,
+                parametersClause,
+                procedureBody
+            );
+        }
+
+        private static string GetObjectDisplayName(ObjectType objectType)
+        {
+            switch (objectType)
+            {
+                case ObjectType.StoredProcedure:
+                    return "Procedure";
+                case ObjectType.Function:
+                    return "Function";
+                case ObjectType.Table:
+                    return "Table";
+                case ObjectType.View:
+                    return "View";
+                case ObjectType.Trigger:
+                    return "Trigger";
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(objectType), objectType, null);
+            }
+        }
+
+        private static string GetDropObjectType(ObjectType objectType)
+        {
+            switch (objectType)
+            {
+                case ObjectType.StoredProcedure:
+                    return "PROCEDURE";
+                case ObjectType.Function:
+                    return "FUNCTION";
+                case ObjectType.Table:
+                    return "TABLE";
+                case ObjectType.View:
+                    return "VIEW";
+                case ObjectType.Trigger:
+                    return "TRIGGER";
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(objectType), objectType, null);
             }
         }
     }
