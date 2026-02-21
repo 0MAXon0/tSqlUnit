@@ -1,3 +1,5 @@
+using System.Data;
+
 namespace TSqlUnit
 {
     /// <summary>
@@ -14,5 +16,10 @@ namespace TSqlUnit
         /// Сообщение о различиях (или причина ошибки)
         /// </summary>
         public string DiffMessage { get; set; }
+
+        /// <summary>
+        /// Табличное представление различий (_m_ = '<', '>', '=')
+        /// </summary>
+        public DataTable DiffTable { get; set; }
     }
 }

@@ -212,6 +212,24 @@ namespace TSqlUnit
         }
 
         /// <summary>
+        /// Форматирует первый результирующий набор в текстовую таблицу
+        /// </summary>
+        public string GetFirstResultSetAsText(int maxRows = 200, int maxCellLength = 120)
+        {
+            var table = GetFirstResultSet();
+            return DataTableComparer.FormatAsTextTable(table, maxRows, maxCellLength);
+        }
+
+        /// <summary>
+        /// Форматирует результирующий набор по индексу в текстовую таблицу
+        /// </summary>
+        public string GetResultSetAsText(int resultSetIndex, int maxRows = 200, int maxCellLength = 120)
+        {
+            var table = GetResultSet(resultSetIndex);
+            return DataTableComparer.FormatAsTextTable(table, maxRows, maxCellLength);
+        }
+
+        /// <summary>
         /// Освобождает ресурсы
         /// </summary>
         public void Dispose()

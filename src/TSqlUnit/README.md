@@ -267,6 +267,13 @@ public T MapToObject<T>(int resultSetIndex, Func<DataRow, T> mapper)
 ```
 Маппит первую строку результирующего набора в объект.
 
+### GetFirstResultSetAsText / GetResultSetAsText
+```csharp
+public string GetFirstResultSetAsText(int maxRows = 200, int maxCellLength = 120)
+public string GetResultSetAsText(int resultSetIndex, int maxRows = 200, int maxCellLength = 120)
+```
+Возвращает результирующие наборы в виде удобной текстовой таблицы.
+
 ## DataTableComparer
 
 Утилиты для сравнения и проекции `DataTable` без привязки к конкретному test framework.
@@ -284,7 +291,29 @@ public static DataTableComparisonResult Compare(
     DataTable actual,
     DataTableComparisonOptions options = null)
 ```
-Сравнивает таблицы и возвращает `IsEqual` + `DiffMessage`.
+Сравнивает таблицы и возвращает `IsEqual`, `DiffMessage` и `DiffTable`.
+При различиях в `DiffTable` первая колонка `_m_` содержит:
+- `<` — строка есть только в expected
+- `>` — строка есть только в actual
+- `=` — строка совпала в expected и actual
+
+### EnsureEqual
+```csharp
+public static void EnsureEqual(
+    DataTable expected,
+    DataTable actual,
+    DataTableComparisonOptions options = null)
+```
+Выбрасывает исключение, если таблицы различаются.
+
+### FormatAsTextTable
+```csharp
+public static string FormatAsTextTable(
+    DataTable table,
+    int maxRows = 200,
+    int maxCellLength = 120)
+```
+Форматирует `DataTable` в человекочитаемую текстовую таблицу.
 
 ## SqlTestSuite
 

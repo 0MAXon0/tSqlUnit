@@ -90,6 +90,44 @@ namespace TSqlUnit.Tests
             Assert.Contains("CREATE TABLE", tableDef, StringComparison.OrdinalIgnoreCase);
         }
 
+        [Fact]
+        public void DataTableComparer_WhenRowsDiffer_ReturnsTsqltLikeDiffTable()
+        {
+            var expected = new DataTable();
+            expected.Columns.Add("Id", typeof(int));
+            expected.Columns.Add("Name", typeof(string));
+            expected.Rows.Add(1, "A");
+            expected.Rows.Add(2, "B");
+
+            var actual = new DataTable();
+            actual.Columns.Add("Id", typeof(int));
+            actual.Columns.Add("Name", typeof(string));
+            actual.Rows.Add(1, "A");
+            actual.Rows.Add(3, "C");
+
+            var comparison = DataTableComparer.Compare(
+                expected,
+                actual,
+                new DataTableComparisonOptions
+                {
+                    IgnoreRowOrder = true,
+                    SortByColumns = new[] { "Id" },
+                    IncludeMatchedRowsInDiff = true
+                });
+
+            Assert.False(comparison.IsEqual);
+            Assert.NotNull(comparison.DiffTable);
+            Assert.Contains("_m_", comparison.DiffMessage);
+            Assert.Contains("<", comparison.DiffMessage);
+            Assert.Contains(">", comparison.DiffMessage);
+            Assert.Contains("=", comparison.DiffMessage);
+
+            Assert.Equal(3, comparison.DiffTable.Rows.Count);
+            Assert.True(ContainsMarker(comparison.DiffTable, "<"));
+            Assert.True(ContainsMarker(comparison.DiffTable, ">"));
+            Assert.True(ContainsMarker(comparison.DiffTable, "="));
+        }
+
         private static void AssertResultSetsForPlayTicTacToe(SqlTestResult result)
         {
             Assert.NotNull(result);
@@ -169,6 +207,17 @@ namespace TSqlUnit.Tests
                 });
 
             Assert.True(comparison.IsEqual, comparison.DiffMessage);
+        }
+
+        private static bool ContainsMarker(DataTable diffTable, string marker)
+        {
+            foreach (DataRow row in diffTable.Rows)
+            {
+                if (Convert.ToString(row["_m_"]) == marker)
+                    return true;
+            }
+
+            return false;
         }
 
         private static void RegisterProductsSetUpSql(SqlTestContext context, string fakeTableName)
