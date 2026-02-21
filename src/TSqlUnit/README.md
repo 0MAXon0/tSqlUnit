@@ -159,6 +159,20 @@ public SqlTestContext MockTable(string tableName, TableDefinitionOptions options
 ```
 Добавляет fake таблицу: определение берется автоматически через `GetTableDefinition()`.
 
+Повторное мокирование того же объекта поддерживает override: применяется последняя подмена (`last fake wins`).
+
+#### SetUpSql
+```csharp
+public SqlTestContext SetUpSql(string setUpSql)
+```
+Регистрирует SQL, который выполняется перед каждым `Execute/ExecuteWithResult`.
+
+#### SetUpProcedure
+```csharp
+public SqlTestContext SetUpProcedure(string procedureName)
+```
+Регистрирует вызов процедуры, который выполняется перед каждым `Execute/ExecuteWithResult`.
+
 #### Build
 ```csharp
 public SqlTestContext Build()
@@ -271,6 +285,22 @@ public static DataTableComparisonResult Compare(
     DataTableComparisonOptions options = null)
 ```
 Сравнивает таблицы и возвращает `IsEqual` + `DiffMessage`.
+
+## SqlTestSuite
+
+Класс для набора тестов с общим SetUp (аналог концепции set up в tSQLt).
+
+### SetUp
+```csharp
+public SqlTestSuite SetUp(Action<SqlTestContext> setUpAction)
+```
+Регистрирует общее действие, которое применяется к каждому создаваемому контексту.
+
+### ForProcedure
+```csharp
+public SqlTestContext ForProcedure(string procedureName)
+```
+Создает новый контекст для теста и применяет все зарегистрированные set up действия.
 
 ### TableDefinitionOptions
 

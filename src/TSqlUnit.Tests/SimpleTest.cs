@@ -19,9 +19,27 @@ namespace TSqlUnit.Tests
 
             try
             {
-                using var context = new SqlTestContext(_connectionString);
-                context
+                var suite = new SqlTestSuite(_connectionString)
+                    .SetUp(ctx => ctx
+                        .MockFunction("dbo.GetFactorial", @"
+                            CREATE FUNCTION [dbo].[GetFactorial](@number INT)
+                            RETURNS BIGINT
+                            AS BEGIN
+                                RETURN 111;
+                            END
+                        ")
+                        .MockView("dbo.View_1", @"
+                            CREATE VIEW [dbo].[View_1]
+                            AS
+                                SELECT 6 AS res;
+                        ")
+                        .MockTable("dbo.Products", TableDefinitionOptions.Default)
+                        .MockProcedure("dbo.GenerateRandomData", "SELECT N'тест' AS [text];")
+                    );
+
+                using var context = suite
                     .ForProcedure("dbo.play_tic_tac_toe")
+                    // Ситуативный override (last fake wins)
                     .MockFunction("dbo.GetFactorial", @"
                         CREATE FUNCTION [dbo].[GetFactorial](@number INT)
                         RETURNS BIGINT
@@ -29,17 +47,10 @@ namespace TSqlUnit.Tests
                             RETURN 999;
                         END
                     ")
-                    .MockView("dbo.View_1", @"
-                        CREATE VIEW [dbo].[View_1]
-                        AS
-                            SELECT 6 AS res;
-                    ")
-                    .MockTable("dbo.Products", TableDefinitionOptions.Default)
-                    .MockProcedure("dbo.GenerateRandomData", "SELECT N'тест' AS [text];")
                     .Build();
 
                 var fakeProductsName = context.GetFakeName(ObjectType.Table, "dbo.Products");
-                SeedFakeProductsTable(context, fakeProductsName);
+                RegisterProductsSetUpSql(context, fakeProductsName);
 
                 var outParam = new SqlParameter("@test", SqlDbType.Int)
                 {
@@ -160,7 +171,7 @@ namespace TSqlUnit.Tests
             Assert.True(comparison.IsEqual, comparison.DiffMessage);
         }
 
-        private static void SeedFakeProductsTable(SqlTestContext context, string fakeTableName)
+        private static void RegisterProductsSetUpSql(SqlTestContext context, string fakeTableName)
         {
             var sql = string.Format(
 @"INSERT INTO [dbo].[{0}] ([CategoryID], [Name], [Weight], [Price])
@@ -169,7 +180,7 @@ VALUES (1, 'Milk', 1.00, 120.50),
                 fakeTableName
             );
 
-            context.ExecuteNonQuery(sql);
+            context.SetUpSql(sql);
         }
 
         private void ResetPlayTicTacToeGlobalTables()

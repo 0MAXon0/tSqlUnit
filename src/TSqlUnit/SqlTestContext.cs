@@ -12,6 +12,7 @@ namespace TSqlUnit
     {
         private readonly string _connectionString;
         private readonly List<FakeDependency> _fakes = new List<FakeDependency>();
+        private readonly List<string> _setUpSqlScripts = new List<string>();
         
         private string _targetProcedure;
         private string _canonicalProcedureName;
@@ -172,6 +173,35 @@ namespace TSqlUnit
 
             return this;
         }
+
+        /// <summary>
+        /// Добавляет SQL, который будет выполнен перед каждым Execute/ExecuteWithResult
+        /// </summary>
+        public SqlTestContext SetUpSql(string setUpSql)
+        {
+            if (string.IsNullOrWhiteSpace(setUpSql))
+                throw new ArgumentNullException(nameof(setUpSql));
+
+            _setUpSqlScripts.Add(setUpSql);
+            return this;
+        }
+
+        /// <summary>
+        /// Добавляет вызов процедуры set up, который будет выполнен перед каждым Execute/ExecuteWithResult
+        /// </summary>
+        public SqlTestContext SetUpProcedure(string procedureName)
+        {
+            if (string.IsNullOrWhiteSpace(procedureName))
+                throw new ArgumentNullException(nameof(procedureName));
+
+            var canonicalProcedureName = SqlMetadataReader.GetCanonicalName(_connectionString, procedureName);
+            if (canonicalProcedureName == null)
+                throw new InvalidOperationException(
+                    string.Format("Procedure '{0}' not found", procedureName));
+
+            _setUpSqlScripts.Add(string.Format("EXEC {0};", canonicalProcedureName));
+            return this;
+        }
         
         /// <summary>
         /// Создает все временные объекты в БД
@@ -200,7 +230,9 @@ namespace TSqlUnit
             
             // Шаг 3: Создаем fake объекты и заменяем их в определении процедуры
             var modifiedProcedureDefinition = procedureDefinition;
-            
+
+            // 3.0: Сначала вычисляем canonical names для всех fake-объектов.
+            // Это нужно для корректной логики override (last fake wins).
             foreach (var fake in _fakes)
             {
                 // 3.1: Получаем каноническое имя объекта
@@ -208,7 +240,15 @@ namespace TSqlUnit
                 if (fake.CanonicalName == null)
                     throw new InvalidOperationException(
                         string.Format("{0} '{1}' not found", GetObjectDisplayName(fake.ObjectType), fake.OriginalName));
-                
+            }
+
+            foreach (var fake in _fakes)
+            {
+                // Если для того же объекта есть более поздний fake, текущий пропускаем.
+                // Семантика как в tSQLt: последняя подмена выигрывает.
+                if (IsOverriddenByLaterFake(fake))
+                    continue;
+
                 // 3.2: Генерируем имя для fake объекта
                 fake.FakeName = TestObjectNameGenerator.Generate(fake.CanonicalName, fake.ObjectType);
                 
@@ -266,6 +306,8 @@ namespace TSqlUnit
         {
             if (!_isBuilt)
                 throw new InvalidOperationException("Call Build() before Execute()");
+
+            RunSetUpScripts();
             
             var sql = string.Format("EXEC [dbo].[{0}]", _testProcedureName);
             
@@ -313,6 +355,8 @@ namespace TSqlUnit
         {
             if (!_isBuilt)
                 throw new InvalidOperationException("Call Build() before ExecuteWithResult()");
+
+            RunSetUpScripts();
             
             var connection = new SqlConnection(_connectionString);
             connection.Open();
@@ -405,8 +449,9 @@ namespace TSqlUnit
                     string.Format("Procedure '{0}' not found", procedureName));
 
             FakeDependency procedureFake = null;
-            foreach (var fake in _fakes)
+            for (var i = _fakes.Count - 1; i >= 0; i--)
             {
+                var fake = _fakes[i];
                 if (fake.ObjectType != ObjectType.StoredProcedure)
                     continue;
 
@@ -484,8 +529,9 @@ namespace TSqlUnit
             if (string.IsNullOrWhiteSpace(objectName))
                 throw new ArgumentNullException(nameof(objectName));
 
-            foreach (var item in _fakes)
+            for (var i = _fakes.Count - 1; i >= 0; i--)
             {
+                var item = _fakes[i];
                 if (item.ObjectType != objectType)
                     continue;
 
@@ -540,6 +586,36 @@ namespace TSqlUnit
         private void ExecuteSql(string sql)
         {
             ExecuteNonQuery(sql);
+        }
+
+        private void RunSetUpScripts()
+        {
+            foreach (var setUpSql in _setUpSqlScripts)
+            {
+                ExecuteNonQuery(setUpSql);
+            }
+        }
+
+        private bool IsOverriddenByLaterFake(FakeDependency currentFake)
+        {
+            if (currentFake == null || string.IsNullOrWhiteSpace(currentFake.CanonicalName))
+                return false;
+
+            for (var i = _fakes.Count - 1; i >= 0; i--)
+            {
+                var candidate = _fakes[i];
+                if (ReferenceEquals(candidate, currentFake))
+                    return false;
+
+                if (candidate.ObjectType == currentFake.ObjectType &&
+                    !string.IsNullOrWhiteSpace(candidate.CanonicalName) &&
+                    candidate.CanonicalName.Equals(currentFake.CanonicalName, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         /// <summary>
