@@ -1,0 +1,35 @@
+﻿{
+  "metadata": [
+    {
+      "src": [
+        {
+          "src": "../src/TSqlUnit",
+          "files": [
+            "TSqlUnit.csproj"
+          ]
+        }
+      ],
+      "dest": "api"
+    }
+  ],
+  "build": {
+    "content": [
+      {
+        "files": [
+          "api/**.yml",
+          "api/index.md",
+          "index.md",
+          "toc.yml"
+        ]
+      }
+    ],
+    "output": "_site",
+    "template": [
+      "default"
+    ],
+    "globalMetadata": {
+      "_appTitle": "TSqlUnit Docs",
+      "_enableSearch": true
+    }
+  }
+}
