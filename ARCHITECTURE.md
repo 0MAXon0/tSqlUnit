@@ -1,308 +1,114 @@
-# Архитектура TSqlUnit
+﻿# Архитектура TSqlUnit
 
-Этот документ описывает внутреннюю архитектуру библиотеки TSqlUnit.
+Документ описывает актуальную архитектуру библиотеки после разбиения на модули, локализации сообщений ошибок и включения контроля XML-документации.
 
-## Структура проекта
+## Цель библиотеки
 
-```
-TSqlUnit/
-├── Core.cs                         # Статические методы для работы с SQL объектами
-├── SqlTestContext.cs               # Основной класс для мокирования (Fluent API)
-├── FakeDependency.cs               # Модель данных для fake объектов
-├── SqlObjectHelper.cs              # Вспомогательные методы для работы с БД
-├── TestObjectNameGenerator.cs      # Генератор уникальных имен
-├── TableDefinitionOptions.cs       # Опции для генерации CREATE TABLE
-├── ObjectType.cs                   # Enum типов SQL объектов
-└── SqlQueries/
-    └── GetTableDefinition.sql      # SQL скрипт для генерации CREATE TABLE
-```
+`TSqlUnit` изолирует SQL-процедуру от зависимостей (функций, представлений, таблиц, процедур), создавая временную тестовую версию процедуры и fake-объекты.  
+Основной сценарий: **детерминированный тест SQL-логики в реальной БД** без влияния на production-объекты.
 
-## Основные компоненты
+## Структура исходников
 
-### 1. Core (Статический класс)
+Исходники библиотеки находятся в `src/TSqlUnit`:
 
-Центральный класс с утилитами для работы с SQL объектами.
-
-**Основные методы:**
-
-- `GetObjectDefinition()` - Получает определение VIEW/PROCEDURE/FUNCTION/TRIGGER через `OBJECT_DEFINITION()`
-- `GetTableDefinition()` - Генерирует полный CREATE TABLE скрипт с constraints
-- `GetCanonicalObjectName()` - Получает каноническое имя `[schema].[name]`
-- `ReplaceObjectName()` - Умная замена имен объектов в SQL скриптах
-
-**Особенности:**
-
-- Использует `Lazy<T>` для кеширования SQL скриптов из embedded resources
-- Все методы требуют `connectionString` для работы с БД
-- Методы `ReplaceObjectName()` использует regex для безопасной замены имен
-
-### 2. SqlTestContext (Основной класс для тестирования)
-
-Главный класс библиотеки, реализующий Fluent API для настройки и выполнения тестов.
-
-**Жизненный цикл:**
-
-```
-Создание → ForProcedure() → MockFunction() × N → Build() → Execute() → Cleanup()
+```text
+src/TSqlUnit
+|-- Comparison/
+|   |-- DataTableComparer.cs
+|   |-- DataTableComparisonOptions.cs
+|   `-- DataTableComparisonResult.cs
+|-- Contexts/
+|   |-- SqlTestContext.cs
+|   |-- SqlTestResult.cs
+|   `-- SqlTestSuite.cs
+|-- Fakes/
+|   |-- FakeDependency.cs                 (internal)
+|   `-- TestObjectNameGenerator.cs        (internal)
+|-- Infrastructure/
+|   `-- SqlScriptModifier.cs
+|-- Metadata/
+|   |-- SqlMetadataReader.cs
+|   |-- TableDefinitionOptions.cs
+|   `-- FakeProcedureTemplateInfo.cs      (internal)
+|-- Models/
+|   `-- ObjectType.cs
+|-- SqlQueries/
+|   |-- GetTableDefinition.sql
+|   `-- GetFakeProcedureTemplateInfo.sql
+`-- TSqlUnit.csproj
 ```
 
-**Внутренняя логика Build():**
+Ключевые роли модулей:
 
-1. Получает каноническое имя процедуры
-2. Получает определение процедуры через `Core.GetObjectDefinition()`
-3. Для каждой fake функции:
-   - Получает каноническое имя оригинальной функции
-   - Генерирует уникальное имя для fake функции
-   - Заменяет имя в скрипте пользователя
-   - Создает fake функцию в БД
-   - Заменяет вызовы оригинальной функции в определении процедуры
-4. Генерирует уникальное имя для тестовой процедуры
-5. Заменяет имя процедуры в определении
-6. Создает тестовую процедуру в БД
+- `Contexts/` — жизненный цикл теста, выполнение и чтение результатов.
+- `Metadata/` — чтение SQL-метаданных и генерация шаблонов.
+- `Infrastructure/` — безопасные SQL-трансформации.
+- `Comparison/` — сравнение результирующих наборов и формирование diff.
 
-**Cleanup:**
+## Границы ответственности
 
-- Удаляет тестовую процедуру
-- Удаляет все fake функции
-- Вызывается автоматически через `IDisposable`
+- `SqlTestContext` управляет оркестрацией, но не содержит SQL-метаданные внутри себя.
+- `SqlMetadataReader` отвечает только за запросы к системным объектам SQL Server.
+- `SqlScriptModifier` отвечает только за трансформацию SQL-скриптов.
+- `DataTableComparer` не зависит от конкретного test framework.
 
-### 3. TestObjectNameGenerator
+## Жизненный цикл теста
 
-Генератор уникальных имен для временных SQL объектов.
+1. Создание контекста: `new SqlTestContext(connectionString)`.
+2. Указание цели: `ForProcedure(...)`.
+3. Регистрация fake-объектов: `MockFunction/MockView/MockTable/MockProcedure`.
+4. Доп. подготовка: `SetupSql(...)` / `SetupProcedure(...)`.
+5. Сборка: `Build()`.
+6. Выполнение: `Execute(...)` или `ExecuteWithResult(...)`.
+7. Очистка: `Cleanup()` / `Dispose()`.
 
-**Формат имени:**
+## Алгоритм `Build()`
 
-```
-Test{Type}_{OriginalName}_{GUID6}
-```
+`Build()` выполняет последовательность:
 
-Примеры:
-- `TestProc_CalculateOrder_a1b2c3`
-- `TestFunc_GetTaxRate_d4e5f6`
-- `TestTable_Orders_g7h8i9`
+1. Канонизация имени целевой процедуры (`[schema].[name]`).
+2. Получение исходного определения процедуры из БД.
+3. Канонизация всех fake-зависимостей.
+4. Разрешение конфликтов по правилу **last fake wins**.
+5. Создание fake-объектов и замена ссылок в SQL-тексте процедуры.
+6. Генерация имени тестовой процедуры.
+7. Создание временной тестовой процедуры в БД.
 
-**GUID:** Использует первые 6 символов GUID для уникальности.
+## Выполнение и результаты
 
-### 4. SqlObjectHelper
+- `Execute(...)` — только выполнение процедуры.
+- `ExecuteWithResult(...)` — выполнение + чтение:
+  - всех результирующих наборов (`ResultSets`),
+  - `OUT`/`INPUTOUTPUT` параметров (`GetOutParameter<T>()`),
+  - `RETURN` значения (`ReturnValue`).
 
-Вспомогательный класс для работы с SQL Server.
+## Очистка
 
-**Методы:**
+`Cleanup()` удаляет:
 
-- `GetCanonicalName()` - Делегирует `Core.GetCanonicalObjectName()`
-- `ExecuteSql()` - Выполняет произвольный SQL
-- `DropObject()` - Удаляет объект (игнорирует ошибки)
+- тестовую процедуру;
+- все созданные fake-объекты;
+- spy-таблицы fake-процедур.
 
-### 5. FakeDependency
+Ошибки удаления подавляются намеренно, чтобы cleanup не ломал финал теста.
 
-Модель данных для хранения информации о fake объекте.
+## Сравнение данных
 
-**Свойства:**
+`DataTableComparer` поддерживает:
 
-- `OriginalName` - Имя как передал пользователь
-- `CanonicalName` - Каноническое имя `[schema].[name]`
-- `FakeName` - Сгенерированное имя (без схемы)
-- `ObjectType` - Тип объекта (Function, Table, etc.)
-- `FakeDefinition` - Скрипт пользователя
-- `FakeDefinitionRenamed` - Скрипт с замененным именем
+- строгую проверку структуры;
+- сравнение с/без учета порядка строк;
+- сортировку по заданным колонкам;
+- diff-таблицу с маркерами `_m_` (`<`, `>`, `=`).
 
-### 6. TableDefinitionOptions
+## Документация и контроль качества
 
-Опции для настройки генерации CREATE TABLE скрипта.
+- В `TSqlUnit.csproj` включена генерация XML-документации.
+- Для библиотеки включен `CS1591` как ошибка сборки (публичный API без XML-комментариев недопустим).
+- DocFX-конфиг находится в `docs/docfx.json`.
 
-**Пресеты:**
+## Принятые соглашения по именованию
 
-- `Default` - Минимальная конфигурация (все флаги = false)
-- `Maximum` - Полная конфигурация (все флаги = true)
-
-## Алгоритм замены имен объектов
-
-Метод `Core.ReplaceObjectName()` использует двухэтапную логику:
-
-### Шаг 1: Замена с явной схемой
-
-Паттерн:
-```regex
-(?<![.\[\]\w])\[?{oldSchema}\]?\.\[?{oldName}\]?(?![.\[\]\w])
-```
-
-Найдет и заменит:
-- `dbo.MyFunc`
-- `[dbo].MyFunc`
-- `dbo.[MyFunc]`
-- `[dbo].[MyFunc]`
-
-### Шаг 2: Замена без схемы (только для dbo)
-
-Если `oldSchema == "dbo"`, дополнительно заменяет объекты без схемы:
-
-Паттерн:
-```regex
-(?<![.\[\]\w])\[?{oldName}\]?(?![.\[\]\w])
-```
-
-Найдет и заменит:
-- `MyFunc`
-- `[MyFunc]`
-
-**Почему только для dbo?**
-
-В SQL Server объекты без схемы по умолчанию принадлежат схеме `dbo`. Если у нас схема `sales`, то `Users` != `sales.Users`.
-
-## Генерация CREATE TABLE скрипта
-
-SQL скрипт `GetTableDefinition.sql` использует CTE для сбора информации:
-
-1. **table_info** - Информация о столбцах (включая computed, identity, defaults)
-2. **pk_info** - Информация о PRIMARY KEY (включая CLUSTERED/NONCLUSTERED)
-3. **uq_info** - Информация о UNIQUE constraints
-4. **fk_info** - Информация о FOREIGN KEYs (включая ON DELETE/UPDATE)
-5. **chk_info** - Информация о CHECK constraints
-
-Финальный скрипт собирается через `STRING_AGG` и `FOR XML PATH`.
-
-**Использование `COLLATE DATABASE_DEFAULT`:**
-
-Все строковые поля из системных таблиц используют `COLLATE DATABASE_DEFAULT` для предотвращения конфликтов collation.
-
-## Встроенные ресурсы (Embedded Resources)
-
-SQL скрипты хранятся как embedded resources и кешируются через `Lazy<T>`.
-
-**Преимущества:**
-
-- SQL скрипты компилируются в DLL
-- Не требуется дополнительных файлов при распространении
-- Быстрый доступ (кеширование)
-- Версионирование вместе с кодом
-
-**Доступ:**
-
-```csharp
-private static string GetEmbeddedSql(string fileName)
-{
-    var assembly = typeof(Core).Assembly;
-    var resourceName = $"TSqlUnit.SqlQueries.{fileName}";
-    using (var stream = assembly.GetManifestResourceStream(resourceName))
-    using (var reader = new StreamReader(stream))
-    {
-        return reader.ReadToEnd();
-    }
-}
-```
-
-## Совместимость с .NET Standard 2.0
-
-Библиотека таргетирует .NET Standard 2.0 для максимальной совместимости.
-
-**Ограничения:**
-
-- Нельзя использовать `switch` expression (C# 8.0+)
-- Нельзя использовать range operator `[..6]` (C# 8.0+)
-- Нельзя использовать `??=` (C# 8.0+)
-- Используем `string.Format()` вместо string interpolation где нужна поддержка старых версий
-
-**Вместо:**
-
-```csharp
-var name = $"Test_{obj}";        // ✗
-var sub = guid[..6];             // ✗
-list ??= new List<T>();          // ✗
-```
-
-**Используем:**
-
-```csharp
-var name = string.Format("Test_{0}", obj);  // ✓
-var sub = guid.Substring(0, 6);             // ✓
-if (list == null) list = new List<T>();    // ✓
-```
-
-## Безопасность
-
-### SQL Injection
-
-Все пользовательские данные передаются через параметры `SqlParameter`:
-
-```csharp
-command.Parameters.AddWithValue("@objectName", objectName);
-```
-
-### Права доступа
-
-Минимальные требуемые права:
-
-- `VIEW DEFINITION` - для получения определений
-- `CREATE PROCEDURE` - для создания тестовых процедур
-- `CREATE FUNCTION` - для создания fake функций
-- `DROP PROCEDURE` / `DROP FUNCTION` - для cleanup
-
-## Паттерны проектирования
-
-### 1. Fluent Interface (Fluent API)
-
-`SqlTestContext` использует Fluent Interface для читаемости:
-
-```csharp
-context
-    .ForProcedure("dbo.MyProc")
-    .MockFunction("dbo.Func1", "...")
-    .MockFunction("dbo.Func2", "...")
-    .Build()
-    .Execute();
-```
-
-### 2. Builder Pattern
-
-`SqlTestContext.Build()` собирает все компоненты перед выполнением.
-
-### 3. Lazy Initialization
-
-SQL скрипты загружаются только при первом использовании:
-
-```csharp
-private static readonly Lazy<string> _getTableDefinitionSql = 
-    new Lazy<string>(() => GetEmbeddedSql("GetTableDefinition.sql"));
-```
-
-### 4. Dispose Pattern
-
-Автоматическая очистка через `IDisposable`:
-
-```csharp
-using (var context = new SqlTestContext(connectionString))
-{
-    // ...
-} // Cleanup() вызовется автоматически
-```
-
-## Будущие улучшения
-
-### Планируется добавить:
-
-- [ ] Мокирование таблиц (создание fake таблиц с тестовыми данными)
-- [ ] Мокирование представлений (views)
-- [ ] Поддержка табличных функций (table-valued functions)
-- [ ] Транзакционная изоляция тестов (автоматический ROLLBACK)
-- [ ] Snapshot testing (сравнение результатов с эталоном)
-- [ ] Интеграция с популярными assertion библиотеками (FluentAssertions, Shouldly)
-- [ ] Parallel execution (параллельное выполнение тестов)
-- [ ] Detailed error reporting (детальные отчеты об ошибках)
-
-## FAQ
-
-### Почему не используется Entity Framework Core?
-
-EF Core - это ORM для работы с данными, а не для тестирования T-SQL кода. Наша задача - получать метаданные объектов и управлять DDL, а не работать с данными.
-
-### Почему статические методы в Core?
-
-Для простоты использования. Методы не хранят состояние и могут быть статическими.
-
-### Можно ли мокировать процедуры?
-
-Пока нет, но это планируется в будущих версиях. Текущая реализация фокусируется на функциях, так как они чаще всего являются зависимостями.
-
-### Можно ли использовать с MS Test / NUnit / xUnit?
-
-Да! `SqlTestContext` - это обычный C# класс, который можно использовать с любым тестовым фреймворком.
+- Публичный API: `PascalCase`.
+- Приватные поля/локальные переменные: `camelCase` с префиксом `_` для полей.
+- Для setup используется единое написание `setup` без вариантов `setUp`.

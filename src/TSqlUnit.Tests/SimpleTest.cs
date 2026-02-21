@@ -1,7 +1,9 @@
-using System;
-using System.Data;
+﻿using System.Data;
 using Microsoft.Data.SqlClient;
-using TSqlUnit;
+using TSqlUnit.Comparison;
+using TSqlUnit.Contexts;
+using TSqlUnit.Metadata;
+using TSqlUnit.Models;
 using Xunit;
 
 namespace TSqlUnit.Tests
@@ -20,7 +22,7 @@ namespace TSqlUnit.Tests
             try
             {
                 var suite = new SqlTestSuite(_connectionString)
-                    .SetUp(ctx => ctx
+                    .Setup(ctx => ctx
                         .MockFunction("dbo.GetFactorial", @"
                             CREATE FUNCTION [dbo].[GetFactorial](@number INT)
                             RETURNS BIGINT
@@ -50,7 +52,7 @@ namespace TSqlUnit.Tests
                     .Build();
 
                 var fakeProductsName = context.GetFakeName(ObjectType.Table, "dbo.Products");
-                RegisterProductsSetUpSql(context, fakeProductsName);
+                RegisterProductsSetupSql(context, fakeProductsName);
 
                 var outParam = new SqlParameter("@test", SqlDbType.Int)
                 {
@@ -111,7 +113,7 @@ namespace TSqlUnit.Tests
                 new DataTableComparisonOptions
                 {
                     IgnoreRowOrder = true,
-                    SortByColumns = new[] { "Id" },
+                    SortByColumns = ["Id"],
                     IncludeMatchedRowsInDiff = true
                 });
 
@@ -203,7 +205,7 @@ namespace TSqlUnit.Tests
                 {
                     IgnoreColumnNameCase = true,
                     IgnoreRowOrder = true,
-                    SortByColumns = sortByColumns ?? new string[0]
+                    SortByColumns = sortByColumns ?? []
                 });
 
             Assert.True(comparison.IsEqual, comparison.DiffMessage);
@@ -220,7 +222,7 @@ namespace TSqlUnit.Tests
             return false;
         }
 
-        private static void RegisterProductsSetUpSql(SqlTestContext context, string fakeTableName)
+        private static void RegisterProductsSetupSql(SqlTestContext context, string fakeTableName)
         {
             var sql = string.Format(
 @"INSERT INTO [dbo].[{0}] ([CategoryID], [Name], [Weight], [Price])
@@ -229,10 +231,10 @@ VALUES (1, 'Milk', 1.00, 120.50),
                 fakeTableName
             );
 
-            context.SetUpSql(sql);
+            context.SetupSql(sql);
         }
 
-        private void ResetPlayTicTacToeGlobalTables()
+        private static void ResetPlayTicTacToeGlobalTables()
         {
             using var context = new SqlTestContext(_connectionString);
             const string sql = @"

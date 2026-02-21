@@ -1,0 +1,13 @@
+﻿global using System;
+global using System.Collections.Generic;
+global using System.Data;
+global using System.Globalization;
+global using System.IO;
+global using System.Text;
+global using System.Text.RegularExpressions;
+global using Microsoft.Data.SqlClient;
+global using TSqlUnit.Comparison;
+global using TSqlUnit.Fakes;
+global using TSqlUnit.Infrastructure;
+global using TSqlUnit.Metadata;
+global using TSqlUnit.Models;

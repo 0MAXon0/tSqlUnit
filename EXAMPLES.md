@@ -1,451 +1,244 @@
-# Примеры использования TSqlUnit
+﻿# Примеры использования TSqlUnit
 
-Этот документ содержит практические примеры использования библиотеки TSqlUnit для различных сценариев тестирования T-SQL кода.
+Ниже собраны актуальные сценарии под текущий API библиотеки.
 
-## Сценарий 1: Тестирование процедуры расчета заказа
+## Базовый шаблон теста
 
-### Исходная процедура
+```csharp
+using Microsoft.Data.SqlClient;
+using TSqlUnit;
+using Xunit;
 
-```sql
-CREATE PROCEDURE dbo.CalculateOrderTotal
-    @OrderId INT
-AS
-BEGIN
-    DECLARE @SubTotal DECIMAL(18,2)
-    DECLARE @TaxRate DECIMAL(5,2)
-    DECLARE @Total DECIMAL(18,2)
-    
-    -- Получаем сумму заказа
-    SELECT @SubTotal = SUM(Quantity * UnitPrice)
-    FROM OrderDetails
-    WHERE OrderId = @OrderId
-    
-    -- Получаем ставку налога (вызов функции)
-    SELECT @TaxRate = dbo.GetTaxRate('CA')
-    
-    -- Считаем итоговую сумму
-    SET @Total = @SubTotal * (1 + @TaxRate)
-    
-    -- Обновляем заказ
-    UPDATE Orders
-    SET TotalAmount = @Total
-    WHERE OrderId = @OrderId
-END
+public class MySqlTests
+{
+    private const string ConnectionString =
+        "Server=localhost;Database=TestDb;Integrated Security=true;TrustServerCertificate=True;";
+
+    [Fact]
+    public void Example()
+    {
+        using var context = new SqlTestContext(ConnectionString)
+            .ForProcedure("dbo.MyProcedure")
+            .Build();
+
+        context.Execute(new SqlParameter("@id", 1));
+    }
+}
 ```
 
-### Unit-тест с мокированием функции GetTaxRate
+## 1) Мокирование функции и проверка RETURN/OUT
+
+```csharp
+using System.Data;
+using Microsoft.Data.SqlClient;
+using TSqlUnit;
+using Xunit;
+
+public class OrderTests
+{
+    private const string ConnectionString =
+        "Server=localhost;Database=TestDb;Integrated Security=true;TrustServerCertificate=True;";
+
+    [Fact]
+    public void CalculateOrder_UsesMockedTaxRate()
+    {
+        using var context = new SqlTestContext(ConnectionString)
+            .ForProcedure("dbo.CalculateOrder")
+            .MockFunction("dbo.GetTaxRate", @"
+                CREATE FUNCTION dbo.GetTaxRate(@state VARCHAR(2))
+                RETURNS DECIMAL(5,2)
+                AS
+                BEGIN
+                    RETURN 0.10;
+                END")
+            .Build();
+
+        var outTotal = new SqlParameter("@total", SqlDbType.Decimal)
+        {
+            Direction = ParameterDirection.Output,
+            Precision = 18,
+            Scale = 2
+        };
+
+        using var result = context.ExecuteWithResult(
+            new SqlParameter("@orderId", 123),
+            outTotal);
+
+        Assert.Equal(1, result.ReturnValue ?? 0);
+        Assert.Equal(110.00m, result.GetOutParameter<decimal>("@total"));
+    }
+}
+```
+
+## 2) Общий setup через `SqlTestSuite` + override fake
 
 ```csharp
 using TSqlUnit;
-using Microsoft.Data.SqlClient;
 using Xunit;
 
-public class CalculateOrderTotalTests
+public class SuiteTests
 {
-    private readonly string _connectionString = "Server=localhost;Database=TestDB;Integrated Security=true;";
-    
+    private const string ConnectionString =
+        "Server=localhost;Database=TestDb;Integrated Security=true;TrustServerCertificate=True;";
+
     [Fact]
-    public void CalculateOrderTotal_WithFixedTaxRate_CalculatesCorrectly()
+    public void LastFakeWins_ForTheSameObject()
     {
-        // Arrange: подготавливаем тестовые данные
-        var orderId = CreateTestOrder(subTotal: 100.00m);
-        
-        // Act: выполняем процедуру с мокированной функцией GetTaxRate
-        using (var context = new SqlTestContext(_connectionString))
-        {
-            context
-                .ForProcedure("dbo.CalculateOrderTotal")
-                .MockFunction("dbo.GetTaxRate", @"
-                    CREATE FUNCTION dbo.GetTaxRate(@state VARCHAR(2))
-                    RETURNS DECIMAL(5,2)
-                    AS BEGIN
-                        RETURN 0.10  -- Фиксируем ставку налога 10% для теста
-                    END
-                ")
-                .Build()
-                .Execute(new SqlParameter("@OrderId", orderId));
-        }
-        
-        // Assert: проверяем результат
-        var actualTotal = GetOrderTotal(orderId);
-        Assert.Equal(110.00m, actualTotal); // 100 + 10% = 110
-    }
-    
-    private int CreateTestOrder(decimal subTotal)
-    {
-        // Код создания тестового заказа
-        // ...
-        return orderId;
-    }
-    
-    private decimal GetOrderTotal(int orderId)
-    {
-        using (var connection = new SqlConnection(_connectionString))
-        {
-            connection.Open();
-            using (var cmd = new SqlCommand("SELECT TotalAmount FROM Orders WHERE OrderId = @id", connection))
-            {
-                cmd.Parameters.AddWithValue("@id", orderId);
-                return (decimal)cmd.ExecuteScalar();
-            }
-        }
-    }
-}
-```
-
-## Сценарий 2: Тестирование процедуры с несколькими зависимостями
-
-### Исходная процедура
-
-```sql
-CREATE PROCEDURE dbo.ProcessPayment
-    @CustomerId INT,
-    @Amount DECIMAL(18,2)
-AS
-BEGIN
-    DECLARE @Discount DECIMAL(5,2)
-    DECLARE @ExchangeRate DECIMAL(10,4)
-    DECLARE @FinalAmount DECIMAL(18,2)
-    
-    -- Получаем скидку клиента
-    SELECT @Discount = dbo.GetCustomerDiscount(@CustomerId)
-    
-    -- Получаем текущий курс валюты
-    SELECT @ExchangeRate = dbo.GetExchangeRate('USD', 'EUR')
-    
-    -- Применяем скидку и конвертируем
-    SET @FinalAmount = @Amount * (1 - @Discount) * @ExchangeRate
-    
-    -- Сохраняем платеж
-    INSERT INTO Payments (CustomerId, Amount, ProcessedDate)
-    VALUES (@CustomerId, @FinalAmount, GETDATE())
-END
-```
-
-### Unit-тест с мокированием обеих функций
-
-```csharp
-[Fact]
-public void ProcessPayment_WithMockedDependencies_CalculatesCorrectly()
-{
-    using (var context = new SqlTestContext(_connectionString))
-    {
-        context
-            .ForProcedure("dbo.ProcessPayment")
-            .MockFunction("dbo.GetCustomerDiscount", @"
-                CREATE FUNCTION dbo.GetCustomerDiscount(@customerId INT)
+        var suite = new SqlTestSuite(ConnectionString)
+            .Setup(ctx => ctx.MockFunction("dbo.GetDiscount", @"
+                CREATE FUNCTION dbo.GetDiscount(@customerId INT)
                 RETURNS DECIMAL(5,2)
-                AS BEGIN
-                    RETURN 0.20  -- 20% скидка для теста
-                END
-            ")
-            .MockFunction("dbo.GetExchangeRate", @"
-                CREATE FUNCTION dbo.GetExchangeRate(@from VARCHAR(3), @to VARCHAR(3))
-                RETURNS DECIMAL(10,4)
-                AS BEGIN
-                    RETURN 0.85  -- Фиксированный курс для теста
-                END
-            ")
-            .Build()
-            .Execute(
-                new SqlParameter("@CustomerId", 123),
-                new SqlParameter("@Amount", 1000.00m)
-            );
-    }
-    
-    // Проверяем: 1000 * (1 - 0.20) * 0.85 = 680.00
-    var payment = GetLastPayment(123);
-    Assert.Equal(680.00m, payment.Amount);
-}
-```
+                AS
+                BEGIN
+                    RETURN 0.05;
+                END"));
 
-## Сценарий 3: Создание изолированной тестовой таблицы
+        using var context = suite
+            .ForProcedure("dbo.CreateInvoice")
+            .MockFunction("dbo.GetDiscount", @"
+                CREATE FUNCTION dbo.GetDiscount(@customerId INT)
+                RETURNS DECIMAL(5,2)
+                AS
+                BEGIN
+                    RETURN 0.20;
+                END")
+            .Build();
 
-```csharp
-public class OrdersRepositoryTests
-{
-    private string _testTableName;
-    
-    [SetUp]
-    public void Setup()
-    {
-        // Получаем структуру оригинальной таблицы
-        var originalTableScript = Core.GetTableDefinition(
-            _connectionString,
-            "dbo.Orders",
-            new TableDefinitionOptions
-            {
-                IncludeIdentity = true,
-                IncludePrimaryKey = true,
-                IncludeDefaults = true,
-                IncludeForeignKeys = false,  // Убираем FK для изоляции
-                IncludeCheckConstraints = true
-            }
-        );
-        
-        // Генерируем уникальное имя для тестовой таблицы
-        _testTableName = TestObjectNameGenerator.Generate("Orders", ObjectType.Table);
-        
-        // Заменяем имя в скрипте
-        var testTableScript = Core.ReplaceObjectName(
-            originalTableScript,
-            "dbo.Orders",
-            $"dbo.{_testTableName}"
-        );
-        
-        // Создаем тестовую таблицу
-        using (var connection = new SqlConnection(_connectionString))
-        {
-            connection.Open();
-            using (var cmd = new SqlCommand(testTableScript, connection))
-            {
-                cmd.ExecuteNonQuery();
-            }
-        }
-    }
-    
-    [TearDown]
-    public void Cleanup()
-    {
-        // Удаляем тестовую таблицу
-        using (var connection = new SqlConnection(_connectionString))
-        {
-            connection.Open();
-            using (var cmd = new SqlCommand($"DROP TABLE IF EXISTS dbo.[{_testTableName}]", connection))
-            {
-                cmd.ExecuteNonQuery();
-            }
-        }
-    }
-    
-    [Test]
-    public void Insert_ValidOrder_Succeeds()
-    {
-        // Тест использует изолированную тестовую таблицу
-        // ...
+        context.Execute();
+        // Проверка результата в БД...
     }
 }
 ```
 
-## Сценарий 4: Получение канонических имен объектов
+## 3) Fake процедуры + чтение spy-лога
 
 ```csharp
-// Пользователь может передать имя в любом формате
-var userInput1 = "MyView";           // без схемы
-var userInput2 = "dbo.MyView";       // со схемой
-var userInput3 = "[dbo].[MyView]";   // со скобками
+using System;
+using System.Data;
+using TSqlUnit;
+using Xunit;
 
-// Получаем канонический формат [schema].[name]
-var canonical1 = Core.GetCanonicalObjectName(_connectionString, userInput1);
-var canonical2 = Core.GetCanonicalObjectName(_connectionString, userInput2);
-var canonical3 = Core.GetCanonicalObjectName(_connectionString, userInput3);
-
-// Все вернут: [dbo].[MyView]
-Console.WriteLine(canonical1); // [dbo].[MyView]
-Console.WriteLine(canonical2); // [dbo].[MyView]
-Console.WriteLine(canonical3); // [dbo].[MyView]
-```
-
-## Сценарий 5: Замена имен объектов в скриптах
-
-```csharp
-var originalScript = @"
-CREATE PROCEDURE dbo.UpdateOrders
-AS
-BEGIN
-    -- Вызываем функцию без схемы (подразумевается dbo)
-    SELECT GetStatus(OrderId) FROM Orders
-    
-    -- Вызываем функцию с явной схемой
-    SELECT dbo.GetStatus(OrderId) FROM Orders
-    
-    -- Вызываем функцию со скобками
-    SELECT [dbo].[GetStatus](OrderId) FROM Orders
-END
-";
-
-// Заменяем все вхождения dbo.GetStatus на dbo.TestFunc_GetStatus_abc123
-var modifiedScript = Core.ReplaceObjectName(
-    originalScript,
-    "dbo.GetStatus",
-    "dbo.TestFunc_GetStatus_abc123"
-);
-
-// Результат: все три вызова заменены на [dbo].[TestFunc_GetStatus_abc123]
-Console.WriteLine(modifiedScript);
-```
-
-## Сценарий 6: Интеграция с популярными тестовыми фреймворками
-
-### xUnit
-
-```csharp
-public class OrderProcessingTests : IDisposable
+public class SpyProcedureTests
 {
-    private readonly string _connectionString;
-    
-    public OrderProcessingTests()
-    {
-        _connectionString = TestConfiguration.GetConnectionString();
-    }
-    
+    private const string ConnectionString =
+        "Server=localhost;Database=TestDb;Integrated Security=true;TrustServerCertificate=True;";
+
     [Fact]
-    public void ProcessOrder_WithDiscount_AppliesCorrectly()
+    public void MockProcedure_WritesInputParametersToSpyLog()
     {
-        using (var context = new SqlTestContext(_connectionString))
-        {
-            context
-                .ForProcedure("dbo.ProcessOrder")
-                .MockFunction("dbo.CalculateDiscount", @"
-                    CREATE FUNCTION dbo.CalculateDiscount(@orderId INT)
-                    RETURNS DECIMAL(5,2)
-                    AS BEGIN
-                        RETURN 0.15
-                    END
-                ")
-                .Build()
-                .Execute(new SqlParameter("@orderId", 1));
-        }
-        
-        // Assertions...
-    }
-    
-    public void Dispose()
-    {
-        // Cleanup if needed
+        using var context = new SqlTestContext(ConnectionString)
+            .ForProcedure("dbo.ProcessData")
+            .MockProcedure("dbo.GenerateRandomData", "SELECT N'тест' AS [text];")
+            .Build();
+
+        context.Execute();
+
+        var spyLog = context.GetSpyProcedureLog("dbo.GenerateRandomData");
+
+        Assert.NotNull(spyLog);
+        Assert.True(spyLog.Rows.Count > 0);
+        Assert.True(spyLog.Columns.Contains("_id_"));
     }
 }
 ```
 
-### NUnit
+## 4) Fake таблица + подготовка данных через `SetupSql`
 
 ```csharp
-[TestFixture]
-public class PaymentProcessingTests
+using System.Data;
+using TSqlUnit;
+using Xunit;
+
+public class FakeTableTests
 {
-    private string _connectionString;
-    
-    [SetUp]
-    public void Setup()
+    private const string ConnectionString =
+        "Server=localhost;Database=TestDb;Integrated Security=true;TrustServerCertificate=True;";
+
+    [Fact]
+    public void MockTable_AllowsIsolatedDataSetup()
     {
-        _connectionString = TestConfiguration.GetConnectionString();
-    }
-    
-    [Test]
-    public void ProcessPayment_WithMockedTaxCalculation_Succeeds()
-    {
-        using (var context = new SqlTestContext(_connectionString))
-        {
-            context
-                .ForProcedure("dbo.ProcessPayment")
-                .MockFunction("dbo.CalculateTax", @"
-                    CREATE FUNCTION dbo.CalculateTax(@amount DECIMAL(18,2))
-                    RETURNS DECIMAL(18,2)
-                    AS BEGIN
-                        RETURN @amount * 0.08
-                    END
-                ")
-                .Build()
-                .Execute(new SqlParameter("@paymentId", 42));
-        }
-        
-        // Assertions...
+        using var context = new SqlTestContext(ConnectionString)
+            .ForProcedure("dbo.GetProducts")
+            .MockTable("dbo.Products", TableDefinitionOptions.Default)
+            .Build();
+
+        var fakeProductsName = context.GetFakeName(ObjectType.Table, "dbo.Products");
+        context.SetupSql($@"
+            INSERT INTO [dbo].[{fakeProductsName}] ([CategoryID], [Name], [Price])
+            VALUES (1, N'Milk', 120.50),
+                   (2, N'Bread', 45.00);");
+
+        using var result = context.ExecuteWithResult();
+        var products = result.GetFirstResultSet();
+
+        Assert.NotNull(products);
+        Assert.Equal(2, products.Rows.Count);
     }
 }
 ```
 
-## Полезные паттерны
-
-### Паттерн: Базовый класс для тестов
+## 5) Сравнение таблиц и человекочитаемый diff
 
 ```csharp
-public abstract class SqlTestBase : IDisposable
+using System.Data;
+using TSqlUnit;
+using Xunit;
+
+public class CompareTests
 {
-    protected readonly string ConnectionString;
-    private readonly List<string> _objectsToCleanup = new List<string>();
-    
-    protected SqlTestBase()
+    [Fact]
+    public void Compare_ReturnsDiffTable()
     {
-        ConnectionString = TestConfiguration.GetConnectionString();
-    }
-    
-    protected void RegisterForCleanup(string objectName, string objectType)
-    {
-        _objectsToCleanup.Add($"DROP {objectType} IF EXISTS {objectName}");
-    }
-    
-    public void Dispose()
-    {
-        using (var connection = new SqlConnection(ConnectionString))
-        {
-            connection.Open();
-            foreach (var sql in _objectsToCleanup)
+        var expected = new DataTable();
+        expected.Columns.Add("Id", typeof(int));
+        expected.Columns.Add("Name", typeof(string));
+        expected.Rows.Add(1, "A");
+        expected.Rows.Add(2, "B");
+
+        var actual = new DataTable();
+        actual.Columns.Add("Id", typeof(int));
+        actual.Columns.Add("Name", typeof(string));
+        actual.Rows.Add(1, "A");
+        actual.Rows.Add(3, "C");
+
+        var comparison = DataTableComparer.Compare(
+            expected,
+            actual,
+            new DataTableComparisonOptions
             {
-                try
-                {
-                    using (var cmd = new SqlCommand(sql, connection))
-                    {
-                        cmd.ExecuteNonQuery();
-                    }
-                }
-                catch
-                {
-                    // Log but don't fail
-                }
-            }
-        }
-    }
-}
+                IgnoreRowOrder = true,
+                SortByColumns = new[] { "Id" },
+                IncludeMatchedRowsInDiff = true
+            });
 
-// Использование
-public class MyTests : SqlTestBase
-{
-    [Test]
-    public void MyTest()
-    {
-        // Test implementation
+        Assert.False(comparison.IsEqual);
+        Assert.NotNull(comparison.DiffTable);
+        Assert.Contains("_m_", comparison.DiffMessage);
     }
 }
 ```
 
-### Паттерн: Фабрика для тестовых данных
+## 6) Работа с метаданными и заменой имен
 
 ```csharp
-public class TestDataFactory
-{
-    private readonly string _connectionString;
-    
-    public TestDataFactory(string connectionString)
-    {
-        _connectionString = connectionString;
-    }
-    
-    public int CreateTestOrder(decimal amount, int customerId)
-    {
-        using (var connection = new SqlConnection(_connectionString))
-        {
-            connection.Open();
-            using (var cmd = new SqlCommand(@"
-                INSERT INTO Orders (CustomerId, Amount, CreatedDate)
-                OUTPUT INSERTED.OrderId
-                VALUES (@customerId, @amount, GETDATE())", 
-                connection))
-            {
-                cmd.Parameters.AddWithValue("@customerId", customerId);
-                cmd.Parameters.AddWithValue("@amount", amount);
-                return (int)cmd.ExecuteScalar();
-            }
-        }
-    }
-    
-    public int CreateTestCustomer(string name, string email)
-    {
-        // Similar implementation
-        return customerId;
-    }
-}
+using TSqlUnit;
+
+var connectionString = "Server=localhost;Database=TestDb;Integrated Security=true;TrustServerCertificate=True;";
+
+var canonical = SqlMetadataReader.GetCanonicalName(connectionString, "dbo.Orders");
+var createTableSql = SqlMetadataReader.GetTableDefinition(connectionString, canonical, TableDefinitionOptions.Maximum);
+
+var testCreateSql = SqlScriptModifier.ReplaceObjectName(
+    createTableSql,
+    "dbo.Orders",
+    "dbo.Orders_Test");
 ```
 
-## Заключение
+## Практические рекомендации
 
-Библиотека TSqlUnit позволяет писать настоящие unit-тесты для T-SQL кода с изоляцией зависимостей. Используйте мокирование функций для контроля внешних зависимостей и создавайте изолированные копии таблиц для тестирования без влияния на реальные данные.
+- Старайся держать один тест = один `SqlTestContext`.
+- Для повторяющихся fake-настроек используй `SqlTestSuite`.
+- Для проверки результирующих наборов удобно сочетать:
+  - `DataTableComparer.SelectColumns(...)`
+  - `DataTableComparer.Compare(...)`
+- Всегда используй `using`/`Dispose`, чтобы cleanup гарантированно выполнился.

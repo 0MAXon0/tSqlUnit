@@ -1,492 +1,132 @@
-# TSqlUnit
+﻿# TSqlUnit API Guide
 
-Библиотека для unit-тестирования T-SQL кода с возможностью мокирования зависимостей.
+Этот документ — краткая техническая шпаргалка по публичному API библиотеки `TSqlUnit`.
 
-## Основные возможности
-
-- ✅ Получение определений SQL объектов (представления, процедуры, функции, триггеры)
-- ✅ Генерация полного CREATE TABLE скрипта с constraints
-- ✅ Мокирование функций при тестировании процедур
-- ✅ Фейкование таблиц при тестировании процедур
-- ✅ Автоматическая очистка временных объектов
-- ✅ Fluent API для удобной настройки тестов
-
-## Установка
-
-```bash
-dotnet add package TSqlUnit
-```
-
-## Быстрый старт
-
-### 1. Получение определения объекта
+## Основной сценарий
 
 ```csharp
-using TSqlUnit;
-
-var connectionString = "Server=localhost;Database=TestDB;Integrated Security=true;";
-
-// Получить определение процедуры/функции/представления
-var definition = Core.GetObjectDefinition(connectionString, "dbo.MyStoredProcedure");
-Console.WriteLine(definition);
-```
-
-### 2. Получение определения таблицы
-
-```csharp
-// Минимальное определение (только структура)
-var minimal = Core.GetTableDefinition(
-    connectionString, 
-    "dbo.Users", 
-    TableDefinitionOptions.Default
-);
-
-// Полное определение (со всеми constraints)
-var full = Core.GetTableDefinition(
-    connectionString, 
-    "dbo.Users", 
-    TableDefinitionOptions.Maximum
-);
-
-// Кастомная конфигурация
-var custom = Core.GetTableDefinition(
-    connectionString, 
-    "dbo.Users", 
-    new TableDefinitionOptions
-    {
-        IncludeIdentity = true,
-        IncludePrimaryKey = true,
-        IncludeForeignKeys = false,
-        IncludeCheckConstraints = false
-    }
-);
-```
-
-### 3. Мокирование зависимостей при тестировании процедур
-
-```csharp
-using TSqlUnit;
 using Microsoft.Data.SqlClient;
+using TSqlUnit;
 
-// Пример: тестируем процедуру CalculateOrder, которая использует функцию GetTaxRate
-using (var context = new SqlTestContext(connectionString))
-{
-    context
-        .ForProcedure("dbo.CalculateOrder")
-        .MockFunction("dbo.GetTaxRate", @"
-            CREATE FUNCTION dbo.GetTaxRate(@state VARCHAR(2))
-            RETURNS DECIMAL(5,2)
-            AS BEGIN
-                RETURN 0.15  -- Фиксированная ставка налога для теста
-            END
-        ")
-        .Build()
-        .Execute(new SqlParameter("@orderId", 123));
-        
-    // Cleanup() вызовется автоматически при Dispose
-}
+using var context = new SqlTestContext(connectionString)
+    .ForProcedure("dbo.MyProcedure")
+    .MockFunction("dbo.GetRate", @"
+        CREATE FUNCTION dbo.GetRate(@id INT)
+        RETURNS DECIMAL(10,4)
+        AS
+        BEGIN
+            RETURN 1.25;
+        END")
+    .Build();
+
+context.Execute(new SqlParameter("@id", 10));
 ```
 
-## API Reference
+## `SqlTestContext`
 
-### Core
+Класс для конфигурации теста, построения окружения с подменами и выполнения тестовой процедуры.
 
-Основной класс для работы с SQL объектами.
+### Конфигурация
 
-#### GetObjectDefinition
-```csharp
-public static string GetObjectDefinition(string connectionString, string objectName)
-```
-Получает определение объекта (VIEW, PROCEDURE, FUNCTION, TRIGGER).
+- `ForProcedure(string procedureName)` — выбрать тестируемую процедуру.
+- `MockFunction(string functionName, string fakeDefinition)` — подменить функцию.
+- `MockView(string viewName, string fakeDefinition)` — подменить представление.
+- `MockTable(string tableName, TableDefinitionOptions options = null)` — создать fake-таблицу на основе метаданных.
+- `MockProcedure(string procedureName, string customSqlAfterSpyInsert = null)` — создать fake-процедуру + spy-таблицу.
 
-#### GetTableDefinition
-```csharp
-public static string GetTableDefinition(
-    string connectionString, 
-    string tableName, 
-    TableDefinitionOptions options = null)
-```
-Генерирует CREATE TABLE скрипт.
+### Дополнительный setup
 
-#### GetCanonicalObjectName
-```csharp
-public static string GetCanonicalObjectName(string connectionString, string objectName)
-```
-Получает каноническое имя объекта в формате `[schema].[name]`.
+- `SetupSql(string setupSql)` — SQL, выполняемый перед каждым `Execute/ExecuteWithResult`.
+- `SetupProcedure(string procedureName)` — вызов setup-процедуры перед выполнением.
 
-#### ReplaceObjectName
-```csharp
-public static string ReplaceObjectName(
-    string definition, 
-    string oldFullName, 
-    string newFullName)
-```
-Заменяет имя объекта в SQL скрипте. Защищает от частичных совпадений.
+### Выполнение
 
-### SqlTestContext
+- `Build()` — создает временные объекты и тестовую процедуру.
+- `Execute(params SqlParameter[] parameters)` — выполнить без чтения результирующих наборов.
+- `ExecuteWithResult(params SqlParameter[] parameters)` — выполнить и вернуть `SqlTestResult`.
 
-Контекст для настройки и выполнения unit-тестов SQL процедур.
+### Служебные методы
 
-#### ForProcedure
-```csharp
-public SqlTestContext ForProcedure(string procedureName)
-```
-Указывает процедуру для тестирования.
+- `GetSpyProcedureLog(string procedureName)` — получить таблицу логов вызовов fake-процедуры.
+- `ExecuteNonQuery(string sql, params SqlParameter[] parameters)` — произвольный SQL без результирующих наборов.
+- `ExecuteQuery(string sql, params SqlParameter[] parameters)` — произвольный SQL c возвратом `DataTable`.
+- `GetFakeName(ObjectType objectType, string objectName)` — получить имя созданного fake-объекта.
+- `Cleanup()` / `Dispose()` — удалить временные объекты.
 
-#### MockFunction
-```csharp
-public SqlTestContext MockFunction(string functionName, string fakeDefinition)
-```
-Добавляет мок функции.
+### Важная семантика
 
-#### MockView
-```csharp
-public SqlTestContext MockView(string viewName, string fakeDefinition)
-```
-Добавляет мок представления.
+- Для повторного fake одного и того же объекта действует правило **last fake wins**.
+- После `Build()` конфигурация больше не изменяется.
 
-#### MockProcedure
-```csharp
-public SqlTestContext MockProcedure(string procedureName, string customSqlAfterSpyInsert = null)
-```
-Добавляет fake процедуру и spy-таблицу для логирования вызовов.
-Параметр `customSqlAfterSpyInsert` (опциональный) вклеивается в тело fake процедуры
-сразу после `INSERT` в spy-таблицу.
+## `SqlTestResult`
 
-#### MockTable
-```csharp
-public SqlTestContext MockTable(string tableName, TableDefinitionOptions options = null)
-```
-Добавляет fake таблицу: определение берется автоматически через `GetTableDefinition()`.
+Обертка над результатом `ExecuteWithResult`.
 
-Повторное мокирование того же объекта поддерживает override: применяется последняя подмена (`last fake wins`).
+- `ResultSets` — список всех результирующих наборов данных.
+- `ReturnValue` — значение `RETURN`.
+- `GetOutParameter<T>(string parameterName)` — значение `OUT`/`INPUTOUTPUT`.
+- `GetFirstResultSet()`, `GetResultSet(int index)`.
+- `GetScalar<T>()`, `GetScalar<T>(int)`, `GetScalar<T>(int, string)`.
+- `MapToList<T>(...)`, `MapToObject<T>(...)`.
+- `GetFirstResultSetAsText(...)`, `GetResultSetAsText(...)`.
 
-#### SetUpSql
-```csharp
-public SqlTestContext SetUpSql(string setUpSql)
-```
-Регистрирует SQL, который выполняется перед каждым `Execute/ExecuteWithResult`.
+## `SqlTestSuite`
 
-#### SetUpProcedure
-```csharp
-public SqlTestContext SetUpProcedure(string procedureName)
-```
-Регистрирует вызов процедуры, который выполняется перед каждым `Execute/ExecuteWithResult`.
-
-#### Build
-```csharp
-public SqlTestContext Build()
-```
-Создает все временные объекты в БД.
-
-#### Execute
-```csharp
-public SqlTestContext Execute(params SqlParameter[] parameters)
-```
-Выполняет тестовую процедуру с параметрами.
-
-#### ExecuteWithResult
-```csharp
-public SqlTestResult ExecuteWithResult(params SqlParameter[] parameters)
-```
-Выполняет тестовую процедуру с параметрами и возвращает результаты (SELECT-ы, OUT параметры, RETURN значение).
-
-#### GetSpyProcedureLog
-```csharp
-public DataTable GetSpyProcedureLog(string procedureName)
-```
-Возвращает логи вызовов fake процедуры из spy-таблицы.
-
-#### ExecuteNonQuery
-```csharp
-public int ExecuteNonQuery(string sql, params SqlParameter[] parameters)
-```
-Выполняет произвольный SQL (удобно для seed/cleanup в тестах).
-
-#### ExecuteQuery
-```csharp
-public DataTable ExecuteQuery(string sql, params SqlParameter[] parameters)
-```
-Выполняет произвольный SQL и возвращает первый результирующий набор.
-
-#### TryGetFake / GetFake / GetFakeName
-```csharp
-public bool TryGetFake(ObjectType objectType, string objectName, out FakeDependency fake)
-public FakeDependency GetFake(ObjectType objectType, string objectName)
-public string GetFakeName(ObjectType objectType, string objectName)
-```
-Доступ к информации о созданных fake-объектах.
-
-### Cleanup
-```csharp
-public void Cleanup()
-```
-Удаляет все временные объекты.
-
-## SqlTestResult
-
-Класс для работы с результатами выполнения процедуры.
-
-### ResultSets
-```csharp
-public List<DataTable> ResultSets { get; }
-```
-Все результирующие наборы данных (SELECT-ы).
-
-### ReturnValue
-```csharp
-public int? ReturnValue { get; }
-```
-Возвращаемое значение процедуры (RETURN).
-
-### GetOutParameter<T>
-```csharp
-public T GetOutParameter<T>(string parameterName)
-```
-Получает значение OUT параметра.
-
-### GetScalar<T>
-```csharp
-public T GetScalar<T>()
-public T GetScalar<T>(int resultSetIndex)
-public T GetScalar<T>(int resultSetIndex, string columnName)
-```
-Получает скалярное значение из результирующего набора.
-
-### MapToList<T>
-```csharp
-public List<T> MapToList<T>(Func<DataRow, T> mapper)
-public List<T> MapToList<T>(int resultSetIndex, Func<DataRow, T> mapper)
-```
-Маппит результирующий набор в список объектов.
-
-### MapToObject<T>
-```csharp
-public T MapToObject<T>(Func<DataRow, T> mapper)
-public T MapToObject<T>(int resultSetIndex, Func<DataRow, T> mapper)
-```
-Маппит первую строку результирующего набора в объект.
-
-### GetFirstResultSetAsText / GetResultSetAsText
-```csharp
-public string GetFirstResultSetAsText(int maxRows = 200, int maxCellLength = 120)
-public string GetResultSetAsText(int resultSetIndex, int maxRows = 200, int maxCellLength = 120)
-```
-Возвращает результирующие наборы в виде удобной текстовой таблицы.
-
-## DataTableComparer
-
-Утилиты для сравнения и проекции `DataTable` без привязки к конкретному test framework.
-
-### SelectColumns
-```csharp
-public static DataTable SelectColumns(DataTable source, params string[] requestedColumns)
-```
-Выбирает подмножество колонок из результирующей таблицы.
-
-### Compare
-```csharp
-public static DataTableComparisonResult Compare(
-    DataTable expected,
-    DataTable actual,
-    DataTableComparisonOptions options = null)
-```
-Сравнивает таблицы и возвращает `IsEqual`, `DiffMessage` и `DiffTable`.
-При различиях в `DiffTable` первая колонка `_m_` содержит:
-- `<` — строка есть только в expected
-- `>` — строка есть только в actual
-- `=` — строка совпала в expected и actual
-
-### EnsureEqual
-```csharp
-public static void EnsureEqual(
-    DataTable expected,
-    DataTable actual,
-    DataTableComparisonOptions options = null)
-```
-Выбрасывает исключение, если таблицы различаются.
-
-### FormatAsTextTable
-```csharp
-public static string FormatAsTextTable(
-    DataTable table,
-    int maxRows = 200,
-    int maxCellLength = 120)
-```
-Форматирует `DataTable` в человекочитаемую текстовую таблицу.
-
-## SqlTestSuite
-
-Класс для набора тестов с общим SetUp (аналог концепции set up в tSQLt).
-
-### SetUp
-```csharp
-public SqlTestSuite SetUp(Action<SqlTestContext> setUpAction)
-```
-Регистрирует общее действие, которое применяется к каждому создаваемому контексту.
-
-### ForProcedure
-```csharp
-public SqlTestContext ForProcedure(string procedureName)
-```
-Создает новый контекст для теста и применяет все зарегистрированные set up действия.
-
-### TableDefinitionOptions
-
-Опции для генерации CREATE TABLE скрипта.
+Общий setup для группы тестов:
 
 ```csharp
-public class TableDefinitionOptions
-{
-    public bool IncludeComputedColumns { get; set; }      // Вычисляемые столбцы
-    public bool IncludeNotNull { get; set; }              // NOT NULL constraints
-    public bool IncludeIdentity { get; set; }             // IDENTITY
-    public bool IncludeDefaults { get; set; }             // DEFAULT values
-    public bool IncludePrimaryKey { get; set; }           // PRIMARY KEY
-    public bool IncludeForeignKeys { get; set; }          // FOREIGN KEYs
-    public bool IncludeCheckConstraints { get; set; }     // CHECK constraints
-    public bool IncludeUniqueConstraints { get; set; }    // UNIQUE constraints
-    
-    public static TableDefinitionOptions Default { get; }   // Минимальная конфигурация
-    public static TableDefinitionOptions Maximum { get; }   // Полная конфигурация
-}
+var suite = new SqlTestSuite(connectionString)
+    .Setup(ctx => ctx.MockFunction("dbo.GetRate", "..."));
+
+using var context = suite.ForProcedure("dbo.Calculate").Build();
 ```
 
-## Минимальные права доступа
+## `SqlMetadataReader`
 
-Для работы библиотеки требуются следующие права:
+Статический класс для чтения метаданных из SQL Server:
 
-- `VIEW DEFINITION` - для получения определений объектов
-- `CREATE PROCEDURE` - для создания тестовых процедур (только для SqlTestContext)
-- `CREATE FUNCTION` - для создания fake функций (только для SqlTestContext)
-- `CREATE TABLE` - для создания fake таблиц (только для SqlTestContext)
-- Права на чтение системных представлений:
-  - `sys.objects`
-  - `sys.columns`
-  - `sys.indexes`
-  - `sys.foreign_keys`
-  - `sys.check_constraints`
+- `GetObjectDefinition(connectionString, objectName)`
+- `GetTableDefinition(connectionString, tableName, options)`
+- `GetCanonicalName(connectionString, objectName)`
 
-## Совместимость
+## `SqlScriptModifier`
 
-- .NET Standard 2.0+ (.NET Framework 4.6.1+, .NET Core 2.0+, .NET 5+)
-- SQL Server 2016+
+- `ReplaceObjectName(sqlScript, oldName, newName)` — замена имени SQL-объекта с учетом схемы и скобок.
 
-## Примеры использования
+## `DataTableComparer`
 
-### Пример 1: Тестирование процедуры с мокированием функции
+Утилиты для проверок результирующих наборов:
 
-```csharp
-// Исходная процедура использует функцию GetDiscount для расчета скидки
-// Для теста мы хотим зафиксировать скидку в 10%
+- `SelectColumns(...)`
+- `Compare(expected, actual, options)`
+- `EnsureEqual(expected, actual, options)`
+- `FormatAsTextTable(table, maxRows, maxCellLength)`
 
-using (var context = new SqlTestContext(connectionString))
-{
-    context
-        .ForProcedure("dbo.CreateInvoice")
-        .MockFunction("dbo.GetDiscount", @"
-            CREATE FUNCTION dbo.GetDiscount(@customerId INT)
-            RETURNS DECIMAL(5,2)
-            AS BEGIN
-                RETURN 0.10  -- Фиксированная скидка 10% для теста
-            END
-        ")
-        .Build()
-        .Execute(
-            new SqlParameter("@customerId", 42),
-            new SqlParameter("@amount", 1000.00m)
-        );
-    
-    // Проверяем результаты в БД...
-}
-```
+`Compare(...)` возвращает `DataTableComparisonResult` с:
 
-### Пример 2: Работа с результатами процедуры
+- `IsEqual`
+- `DiffMessage`
+- `DiffTable` (колонка `_m_`: `<`, `>`, `=`)
 
-```csharp
-// Процедура возвращает SELECT, OUT параметр и RETURN значение
-using (var context = new SqlTestContext(connectionString))
-{
-    context
-        .ForProcedure("dbo.CalculateOrder")
-        .MockFunction("dbo.GetTaxRate", @"
-            CREATE FUNCTION dbo.GetTaxRate(@state VARCHAR(2))
-            RETURNS DECIMAL(5,2)
-            AS BEGIN
-                RETURN 0.08  -- 8% налог для теста
-            END
-        ")
-        .Build();
+## Дополнительные типы
 
-    var totalParam = new SqlParameter("@total", SqlDbType.Decimal)
-    {
-        Direction = ParameterDirection.Output,
-        Precision = 18,
-        Scale = 2
-    };
+- `ObjectType` — тип SQL-объекта (`StoredProcedure`, `Function`, `Table`, `View`, `Trigger`).
+- `TableDefinitionOptions` — флаги для генерации `CREATE TABLE`.
 
-    using (var result = context.ExecuteWithResult(
-        new SqlParameter("@orderId", 123),
-        totalParam))
-    {
-        // Получаем OUT параметр
-        var total = result.GetOutParameter<decimal>("@total");
-        
-        // Получаем RETURN значение
-        var returnCode = result.ReturnValue ?? 0;
-        
-        // Получаем скалярное значение из SELECT
-        var orderNumber = result.GetScalar<string>(0, "OrderNumber");
-        
-        // Маппим результаты в модель
-        var orderInfo = result.MapToObject<OrderInfo>(row => new OrderInfo
-        {
-            OrderId = Convert.ToInt32(row["OrderId"]),
-            Total = Convert.ToDecimal(row["Total"]),
-            Status = row["Status"].ToString()
-        });
-        
-        // Assertions
-        Assert.AreEqual(972.00m, total);
-        Assert.AreEqual(1, returnCode);
-    }
-}
-```
+Внутренние служебные типы (`FakeDependency`, `FakeProcedureTemplateInfo`, `TestObjectNameGenerator`) имеют `internal`-доступ и не являются частью публичного API.
 
-### Пример 3: Получение структуры таблицы для создания тестовой копии
+## Требуемые права в SQL Server
 
-```csharp
-// Получаем структуру таблицы без foreign keys для создания изолированной тестовой копии
-var tableScript = Core.GetTableDefinition(
-    connectionString,
-    "dbo.Orders",
-    new TableDefinitionOptions
-    {
-        IncludeIdentity = true,
-        IncludePrimaryKey = true,
-        IncludeForeignKeys = false,  // Убираем FK для изоляции
-        IncludeDefaults = true
-    }
-);
+Минимально:
 
-// Изменяем имя таблицы на TestOrders
-var testTableScript = Core.ReplaceObjectName(
-    tableScript,
-    "dbo.Orders",
-    "dbo.TestOrders"
-);
+- `VIEW DEFINITION`
+- `CREATE PROCEDURE`
+- `CREATE FUNCTION`
+- `CREATE TABLE`
+- права чтения системных представлений (`sys.objects`, `sys.columns`, и т.д.)
 
-// Создаем тестовую таблицу
-using (var connection = new SqlConnection(connectionString))
-{
-    connection.Open();
-    using (var cmd = new SqlCommand(testTableScript, connection))
-    {
-        cmd.ExecuteNonQuery();
-    }
-}
-```
+## Контроль документации
 
-## Лицензия
-
-MIT
+- XML-комментарии генерируются при сборке.
+- `CS1591` включен как ошибка для публичного API.
+- HTML-дока строится через DocFX (`docs/docfx.json`).
